@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# 下载 mihomo Android arm64 二进制到 assets（打包前执行一次）
+set -euo pipefail
+VERSION="${MIHOMO_VERSION:-v1.19.26}"
+ASSET="mihomo-android-arm64-v8-${VERSION}.gz"
+URL="https://github.com/MetaCubeX/mihomo/releases/download/${VERSION}/${ASSET}"
+OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/android/app/src/main/assets"
+mkdir -p "$OUT_DIR"
+TMP="$(mktemp)"
+echo "Downloading ${URL} ..."
+curl -fL --retry 5 --retry-delay 3 -o "$TMP" "$URL"
+gunzip -c "$TMP" > "${OUT_DIR}/mihomo"
+chmod +x "${OUT_DIR}/mihomo"
+JNI_DIR="$(cd "$(dirname "$0")/.." && pwd)/android/app/src/main/jniLibs/arm64-v8a"
+mkdir -p "$JNI_DIR"
+cp "${OUT_DIR}/mihomo" "$JNI_DIR/libmihomo.so"
+chmod +x "$JNI_DIR/libmihomo.so"
+rm -f "$TMP"
+file "${OUT_DIR}/mihomo"
+ls -lh "${OUT_DIR}/mihomo" "$JNI_DIR/libmihomo.so"
+echo "Done."

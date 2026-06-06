@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">灵猫加速器</string>
+    <string name="disguise_calculator">计算器</string>
+    <string name="disguise_weather">天气</string>
+    <string name="disguise_notes">便签</string>
+    <string name="disguise_settings">设置</string>
+    <string name="disguise_album">相册</string>
+    <string name="disguise_gallery">图库</string>
+    <string name="disguise_phone">电话</string>
+    <string name="vpn_session_name">灵猫加速器</string>
+    <string name="vpn_notification_channel">VPN 连接</string>
+    <string name="vpn_notification_text">当前节点：%1$s</string>
+</resources>
