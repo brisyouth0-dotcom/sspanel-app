@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -18,7 +17,7 @@ class HomeAuroraBackground extends StatefulWidget {
 class _HomeAuroraBackgroundState extends State<HomeAuroraBackground>
     with SingleTickerProviderStateMixin {
   static const _backgroundImage = 'assets/images/home_bg_cat.png';
-  static const _imageBackdrop = Color(0xFFF3F1EE);
+  static const _imageBackdrop = Color(0xFF12151C);
 
   late final AnimationController _controller;
 
@@ -27,8 +26,21 @@ class _HomeAuroraBackgroundState extends State<HomeAuroraBackground>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 12),
-    )..repeat();
+      duration: const Duration(seconds: 16),
+    );
+    if (widget.connected) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void didUpdateWidget(HomeAuroraBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.connected && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.connected && _controller.isAnimating) {
+      _controller.stop();
+    }
   }
 
   @override
@@ -39,49 +51,58 @@ class _HomeAuroraBackgroundState extends State<HomeAuroraBackground>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            const ColoredBox(color: _imageBackdrop),
-            ImageFiltered(
-              imageFilter: ui.ImageFilter.blur(sigmaX: 4, sigmaY: 4),
-              child: SizedBox.expand(
-                child: Image.asset(
-                  _backgroundImage,
-                  fit: BoxFit.cover,
-                  alignment: Alignment.center,
-                  filterQuality: FilterQuality.high,
-                ),
+    return RepaintBoundary(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          const ColoredBox(color: _imageBackdrop),
+          ColorFiltered(
+            colorFilter: const ColorFilter.matrix([
+              0.45, 0, 0, 0, 0,
+              0, 0.45, 0, 0, 0,
+              0, 0, 0.45, 0, 0,
+              0, 0, 0, 1, 0,
+            ]),
+            child: SizedBox.expand(
+              child: Image.asset(
+                _backgroundImage,
+                fit: BoxFit.cover,
+                alignment: Alignment.center,
+                filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
               ),
             ),
-            DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.1),
-                    Colors.black.withValues(alpha: 0.0),
-                    AppColors.bg.withValues(alpha: 0.05),
-                    AppColors.bg.withValues(alpha: 0.32),
-                  ],
-                  stops: const [0, 0.32, 0.62, 1],
-                ),
+          ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.1),
+                  Colors.black.withValues(alpha: 0.0),
+                  AppColors.bg.withValues(alpha: 0.05),
+                  AppColors.bg.withValues(alpha: 0.32),
+                ],
+                stops: const [0, 0.32, 0.62, 1],
               ),
             ),
-            CustomPaint(
-              painter: _AtmospherePainter(
-                t: _controller.value,
-                connected: widget.connected,
-              ),
-              size: Size.infinite,
+          ),
+          if (widget.connected)
+            AnimatedBuilder(
+              animation: _controller,
+              builder: (context, _) {
+                return CustomPaint(
+                  painter: _AtmospherePainter(
+                    t: _controller.value,
+                    connected: widget.connected,
+                  ),
+                  size: Size.infinite,
+                );
+              },
             ),
-          ],
-        );
-      },
+        ],
+      ),
     );
   }
 }
@@ -96,10 +117,10 @@ class _AtmospherePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
     final phase = t * math.pi * 2;
-    final glow = connected ? 1.0 : 0.45;
+    const glow = 1.0;
 
     final sweep = Paint()
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 48)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 36)
       ..shader = LinearGradient(
         begin: Alignment.centerLeft,
         end: Alignment.centerRight,

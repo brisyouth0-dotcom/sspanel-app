@@ -11,6 +11,7 @@ class SettingsTile extends StatelessWidget {
     this.trailing,
     this.onTap,
     this.showChevron = true,
+    this.iconColor,
   });
 
   final IconData icon;
@@ -19,6 +20,7 @@ class SettingsTile extends StatelessWidget {
   final Widget? trailing;
   final VoidCallback? onTap;
   final bool showChevron;
+  final Color? iconColor;
 
   @override
   Widget build(BuildContext context) {
@@ -28,7 +30,7 @@ class SettingsTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Row(
           children: [
-            Icon(icon, color: AppColors.textSecondary, size: 22),
+            Icon(icon, color: iconColor ?? AppColors.textSecondary, size: 22),
             const SizedBox(width: 14),
             Expanded(
               child: Column(

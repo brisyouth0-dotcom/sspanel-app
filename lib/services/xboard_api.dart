@@ -672,6 +672,16 @@ class XboardApi {
     return true;
   }
 
+  Future<bool> cancelOrder(String tradeNo) async {
+    final response = await _http.post(
+      '/user/order/cancel',
+      data: {'trade_no': tradeNo},
+    );
+    final json = _http.decodeJson(response);
+    _ensureSuccess(json, fallback: '取消订单失败');
+    return json!['data'] == true;
+  }
+
   Future<List<RechargeRecord>> fetchRecharges() async {
     final response = await _http.get('/user/order/fetch');
     final json = _http.decodeJson(response);
@@ -847,6 +857,7 @@ class XboardApi {
     ].join('\n');
     return Announcement(
       id: '${m['id']}',
+      title: title.isNotEmpty ? title : null,
       content: merged,
       publishedAt: _parseTimestamp(
         m['created_at'] ?? m['updated_at'] ?? m['created_time'],

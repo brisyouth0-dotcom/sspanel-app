@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.kele" "\0"
-            VALUE "FileDescription", "kele_vpn" "\0"
+            VALUE "CompanyName", "com.xinglian" "\0"
+            VALUE "FileDescription", "LingMao VPN" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "kele_vpn" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.kele. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.xinglian. All rights reserved." "\0"
             VALUE "OriginalFilename", "kele_vpn.exe" "\0"
-            VALUE "ProductName", "kele_vpn" "\0"
+            VALUE "ProductName", "LingMao VPN" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

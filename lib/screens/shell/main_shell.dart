@@ -19,8 +19,8 @@ class _MainShellState extends State<MainShell> {
 
   @override
   Widget build(BuildContext context) {
-    final index = context.watch<AppState>().shellTabIndex;
-    final busy = context.watch<AppState>().loading;
+    final index = context.select<AppState, int>((s) => s.shellTabIndex);
+    final busy = context.select<AppState, bool>((s) => s.loading);
 
     return Scaffold(
       backgroundColor: AppColors.bg,

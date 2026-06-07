@@ -31,7 +31,9 @@ class _StoreScreenState extends State<StoreScreen>
     super.initState();
     _tab = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().loadPlans(force: true);
+      final state = context.read<AppState>();
+      state.loadPlans(force: true);
+      state.loadRecharges(quiet: true);
     });
   }
 
@@ -203,11 +205,6 @@ class _StoreScreenState extends State<StoreScreen>
             _BottomPurchaseBar(
               plan: selectedPlan,
               selectedPeriod: selectedPeriod,
-              onPeriodSelect: (period) {
-                setState(
-                  () => _selectedPeriodByPlan[selectedPlan.id] = period.id,
-                );
-              },
             ),
         ],
       ),
@@ -309,46 +306,35 @@ class _BottomPurchaseBar extends StatelessWidget {
   const _BottomPurchaseBar({
     required this.plan,
     required this.selectedPeriod,
-    required this.onPeriodSelect,
   });
 
   final ShopPlan plan;
   final PlanPeriod selectedPeriod;
-  final ValueChanged<PlanPeriod> onPeriodSelect;
+
+  void _showPendingSnackBar(BuildContext context) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('您有未支付的订单，请先完成支付'),
+        action: SnackBarAction(
+          label: '去支付',
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(builder: (_) => const RechargeScreen()),
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final periods = plan.availablePeriods;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: SafeArea(
         top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (periods.length > 1) ...[
-              SizedBox(
-                height: 44,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: periods.length,
-                  separatorBuilder: (context, index) =>
-                      const SizedBox(width: 8),
-                  itemBuilder: (context, index) {
-                    final period = periods[index];
-                    return _PeriodOption(
-                      period: period,
-                      selected: period.id == selectedPeriod.id,
-                      onTap: () => onPeriodSelect(period),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 10),
-            ],
-            FilledButton(
+        child: FilledButton(
               onPressed: state.loading
                   ? null
                   : () async {
@@ -358,7 +344,9 @@ class _BottomPurchaseBar extends StatelessWidget {
                       );
                       if (!context.mounted) return;
                       if (order == null) {
-                        if (state.error != null) {
+                        if (state.pendingRecharges.isNotEmpty) {
+                          _showPendingSnackBar(context);
+                        } else if (state.error != null) {
                           showAppErrorSnackBar(context, state.error!);
                         }
                         return;
@@ -369,8 +357,10 @@ class _BottomPurchaseBar extends StatelessWidget {
                         MaterialPageRoute<void>(
                           builder: (_) => PaymentScreen(
                             invoiceId: order.invoiceId,
-                            planName: '${plan.name} · ${selectedPeriod.label}',
+                            planName: plan.name,
                             price: selectedPeriod.price,
+                            periods: plan.availablePeriods,
+                            initialPeriodId: selectedPeriod.id,
                           ),
                         ),
                       );
@@ -404,89 +394,6 @@ class _BottomPurchaseBar extends StatelessWidget {
                 ],
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PeriodOption extends StatelessWidget {
-  const _PeriodOption({
-    required this.period,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final PlanPeriod period;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.topCenter,
-        children: [
-          Container(
-            width: 88,
-            height: 40,
-            margin: const EdgeInsets.only(top: 3),
-            decoration: BoxDecoration(
-              color: selected
-                  ? AppColors.primary.withValues(alpha: 0.16)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: selected ? AppColors.primary : AppColors.border,
-                width: selected ? 1.5 : 1,
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  period.label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: selected ? AppColors.primary : AppColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  '¥${period.price.toStringAsFixed(2)}',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: selected
-                        ? AppColors.primary
-                        : AppColors.textSecondary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (period.badge != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: const Color(0xFF34D399),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Text(
-                period.badge!,
-                style: const TextStyle(
-                  color: Color(0xFF08251B),
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-        ],
       ),
     );
   }
@@ -610,10 +517,11 @@ class _PlanCard extends StatelessWidget {
                           : AppColors.textPrimary,
                     ),
                   ),
-                  Text(
-                    _displayPeriod.label,
-                    style: AppTheme.bodySecondary.copyWith(fontSize: 11),
-                  ),
+                  if (plan.availablePeriods.length > 1)
+                    Text(
+                      '多种周期可选',
+                      style: AppTheme.bodySecondary.copyWith(fontSize: 11),
+                    ),
                 ],
               ),
             ],
@@ -672,16 +580,53 @@ class _MetaChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 13, color: AppColors.textMuted),
-        const SizedBox(width: 3),
-        Text(
-          label,
-          style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
-        ),
-      ],
+    final valueMatch = RegExp(r'(\d+(?:\.\d+)?\s*(?:GB|TB|天))').firstMatch(label);
+    final valueText = valueMatch?.group(1);
+    final prefix = valueText == null
+        ? label
+        : label.substring(0, label.indexOf(valueText)).trim();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.cardElevated,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: AppColors.textSecondary),
+          const SizedBox(width: 4),
+          if (valueText == null)
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textSecondary,
+              ),
+            )
+          else ...[
+            if (prefix.isNotEmpty)
+              Text(
+                prefix,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+            if (prefix.isNotEmpty) const SizedBox(width: 4),
+            Text(
+              valueText,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: AppColors.primary,
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

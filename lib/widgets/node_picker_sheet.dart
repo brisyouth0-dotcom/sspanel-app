@@ -5,6 +5,7 @@ import '../models/models.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import 'node_visuals.dart';
+import 'ping_badge.dart';
 
 /// 首页点击节点条后弹出的节点选择面板（参考设计图四）。
 Future<void> showNodePickerSheet(BuildContext context) {
@@ -288,7 +289,7 @@ class _NodeRow extends StatelessWidget {
                   ),
                 )
               else if (speedTested)
-                _PingBadge(ms: pingMs)
+                PingBadge(ms: pingMs)
               else
                 NodeSignal(status: node.status, active: selected || node.status == NodeStatus.online),
             ],
@@ -299,38 +300,3 @@ class _NodeRow extends StatelessWidget {
   }
 }
 
-class _PingBadge extends StatelessWidget {
-  const _PingBadge({required this.ms});
-
-  final int? ms;
-
-  Color get _color {
-    if (ms == null) return const Color(0xFFEF4444);
-    if (ms! < 100) return AppColors.primary;
-    if (ms! < 300) return const Color(0xFFFACC15);
-    return const Color(0xFFFB923C);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final label = ms == null ? '超时' : '${ms}ms';
-    return Container(
-      margin: const EdgeInsets.only(left: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-      decoration: BoxDecoration(
-        color: _color.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: _color.withValues(alpha: 0.55), width: 1),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          color: _color,
-          letterSpacing: 0.2,
-        ),
-      ),
-    );
-  }
-}

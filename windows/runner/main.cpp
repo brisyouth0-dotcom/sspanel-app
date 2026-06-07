@@ -25,9 +25,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
-  Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
-  if (!window.Create(L"kele_vpn", origin, size)) {
+
+  // 默认手机竖屏尺寸（与 macOS MainFlutterWindow 一致：390 × 844）
+  constexpr int kPhoneWidth = 390;
+  constexpr int kPhoneHeight = 844;
+  const int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+  const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+  const int originX = (screenWidth - kPhoneWidth) / 2;
+  const int originY = (screenHeight - kPhoneHeight) / 2;
+
+  Win32Window::Point origin(originX, originY);
+  Win32Window::Size size(kPhoneWidth, kPhoneHeight);
+  if (!window.Create(L"\u7075\u732b\u52a0\u901f\u5668", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

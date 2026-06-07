@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import '../config/app_config.dart';
@@ -38,7 +39,8 @@ class MihomoService {
             : 'mihomo 启动失败',
       );
     }
-    await _waitUntilAlive();
+    // 冷启动不阻塞等待，连接/测速时会自行等待就绪
+    unawaited(_waitUntilAlive(maxAttempts: 40).catchError((_) {}));
   }
 
   Future<void> connect({
@@ -219,10 +221,10 @@ class MihomoService {
 
   Future<void> setMode(String mode) => _api.setMode(mode);
 
-  Future<void> _waitUntilAlive({int maxAttempts = 80}) async {
+  Future<void> _waitUntilAlive({int maxAttempts = 50}) async {
     for (var i = 0; i < maxAttempts; i++) {
       if (await _api.isAlive()) return;
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     final bin = await MihomoBridge.resolveBinary();
     if (bin == null) {

@@ -79,6 +79,7 @@ class _TicketsScreenState extends State<TicketsScreen> {
   }
 
   void _openDetail(SupportTicket ticket) {
+    context.read<AppState>().markTicketRead(ticket.id);
     Navigator.push<void>(
       context,
       MaterialPageRoute<void>(
@@ -101,7 +102,6 @@ class _TicketsScreenState extends State<TicketsScreen> {
             icon: const Icon(Icons.refresh),
             onPressed: () => context.read<AppState>().loadTickets(),
           ),
-          IconButton(icon: const Icon(Icons.add), onPressed: _showCreateDialog),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -125,11 +125,6 @@ class _TicketsScreenState extends State<TicketsScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text('暂无工单', style: AppTheme.bodySecondary),
-                  const SizedBox(height: 16),
-                  FilledButton(
-                    onPressed: _showCreateDialog,
-                    child: const Text('提交第一个工单'),
-                  ),
                 ],
               ),
             )

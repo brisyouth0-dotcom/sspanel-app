@@ -17,6 +17,7 @@ import '../services/mihomo_service.dart';
 import '../services/node_speed_test.dart';
 import '../services/panel_exceptions.dart';
 import '../services/system_proxy_bridge.dart';
+import '../services/read_state_store.dart';
 import '../services/vpn_bridge.dart';
 import '../utils/user_messages.dart';
 
@@ -30,7 +31,9 @@ class AppState extends ChangeNotifier {
 
   final ApiService _api;
   final MihomoService _mihomo;
+  final ReadStateStore _readState = ReadStateStore();
   MihomoTrafficMonitor? _trafficMonitor;
+  DateTime? _lastTrafficNotify;
   bool _initialized = false;
   int _loadingCount = 0;
   String? _loadingMessage;
@@ -98,6 +101,35 @@ class AppState extends ChangeNotifier {
   String? _telegramUrl;
   String? get telegramUrl => _telegramUrl;
 
+  Set<String> _readAnnouncementIds = {};
+  Set<String> _readTicketIds = {};
+
+  Set<String> get readAnnouncementIds => _readAnnouncementIds;
+
+  int get unreadAnnouncementCount {
+    final list = _announcements;
+    if (list == null || list.isEmpty) return 0;
+    return list.where((a) => !_readAnnouncementIds.contains(a.id)).length;
+  }
+
+  int get unreadTicketCount {
+    final list = _tickets;
+    if (list == null || list.isEmpty) return 0;
+    return list
+        .where(
+          (t) =>
+              t.status == TicketStatus.replied &&
+              !_readTicketIds.contains(t.id),
+        )
+        .length;
+  }
+
+  List<RechargeRecord> get pendingRecharges =>
+      _recharges?.where((r) => r.status == '待支付').toList() ?? const [];
+
+  RechargeRecord? get firstPendingRecharge =>
+      pendingRecharges.isNotEmpty ? pendingRecharges.first : null;
+
   Future<void> setUiLang(UiLang lang) async {
     _uiLang = lang;
     notifyListeners();
@@ -162,7 +194,13 @@ class AppState extends ChangeNotifier {
       monitor.start((up, down) {
         _trafficUpBps = up;
         _trafficDownBps = down;
-        notifyListeners();
+        final now = DateTime.now();
+        if (_lastTrafficNotify == null ||
+            now.difference(_lastTrafficNotify!) >=
+                const Duration(milliseconds: 450)) {
+          _lastTrafficNotify = now;
+          notifyListeners();
+        }
       }),
     );
   }
@@ -172,6 +210,7 @@ class AppState extends ChangeNotifier {
     _trafficMonitor = null;
     _trafficUpBps = 0;
     _trafficDownBps = 0;
+    _lastTrafficNotify = null;
   }
 
   Future<void> _onVpnConnected() async {
@@ -293,14 +332,14 @@ class AppState extends ChangeNotifier {
       }
     });
     await loadUiLangPrefs();
+    await _loadReadState();
     if (!kIsWeb && Platform.isAndroid) {
       await _reconcileAndroidVpnState();
     }
     if (_mihomo.isSupported &&
         (kIsWeb || (!Platform.isAndroid && !Platform.isIOS))) {
-      try {
-        await _mihomo.bootstrap();
-      } catch (_) {}
+      // 桌面端后台启动 mihomo，避免阻塞首屏
+      unawaited(_mihomo.bootstrap().catchError((_) {}));
     }
     await runWithLoading('正在连接服务器…', () async {
       await _api.init();
@@ -525,6 +564,24 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<void> _loadReadState() async {
+    _readAnnouncementIds = await _readState.readAnnouncementIds();
+    _readTicketIds = await _readState.readTicketIds();
+    notifyListeners();
+  }
+
+  Future<void> markAnnouncementRead(String id) async {
+    await _readState.markAnnouncementRead(id);
+    _readAnnouncementIds = {..._readAnnouncementIds, id};
+    notifyListeners();
+  }
+
+  Future<void> markTicketRead(String id) async {
+    await _readState.markTicketRead(id);
+    _readTicketIds = {..._readTicketIds, id};
+    notifyListeners();
+  }
+
   Future<void> loadAnnouncements() async {
     try {
       _announcements = await _api.fetchAnnouncements();
@@ -731,12 +788,40 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<bool> preparePaymentForInvoice(String invoiceId) async {
+    _error = null;
+    _beginLoading('正在获取支付方式…');
+    try {
+      _paymentMethods = await _api.fetchPaymentMethods(invoiceId);
+      notifyListeners();
+      return true;
+    } on PanelApiException catch (e) {
+      _error = e.message;
+      notifyListeners();
+      return false;
+    } catch (e) {
+      _error = UserMessages.networkError(e);
+      notifyListeners();
+      return false;
+    } finally {
+      _endLoading();
+    }
+  }
+
   Future<OrderResult?> createOrder(
     String planId, {
     String? period,
     String coupon = '',
   }) async {
     _error = null;
+    if (pendingRecharges.isEmpty) {
+      await loadRecharges(quiet: true);
+    }
+    if (pendingRecharges.isNotEmpty) {
+      _error = '您有未支付的订单，请先完成支付或稍后再试';
+      notifyListeners();
+      return null;
+    }
     _beginLoading('正在创建订单…');
     try {
       ShopPlan? matched;
@@ -772,11 +857,38 @@ class AppState extends ChangeNotifier {
   String paymentUrl(String gateway, String invoiceId) =>
       _api.paymentUrl(gateway, invoiceId: invoiceId);
 
-  Future<void> loadRecharges() async {
-    await runWithLoading('正在加载充值记录…', () async {
+  Future<void> loadRecharges({bool quiet = false}) async {
+    Future<void> work() async {
       _recharges = await _api.fetchRecharges();
       notifyListeners();
-    });
+    }
+    if (quiet) {
+      await work();
+    } else {
+      await runWithLoading('正在加载充值记录…', work);
+    }
+  }
+
+  Future<bool> cancelOrder(String tradeNo) async {
+    _error = null;
+    _beginLoading('正在取消订单…');
+    try {
+      final ok = await _api.cancelOrder(tradeNo);
+      if (ok) {
+        await loadRecharges(quiet: true);
+      }
+      return ok;
+    } on PanelApiException catch (e) {
+      _error = e.message;
+      notifyListeners();
+      return false;
+    } catch (e) {
+      _error = UserMessages.networkError(e);
+      notifyListeners();
+      return false;
+    } finally {
+      _endLoading();
+    }
   }
 
   Future<void> loadTickets({bool quiet = false}) async {

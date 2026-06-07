@@ -207,12 +207,35 @@ class Announcement {
   const Announcement({
     required this.id,
     required this.content,
+    this.title,
     this.publishedAt,
   });
 
   final String id;
   final String content;
+  final String? title;
   final DateTime? publishedAt;
+
+  String get listTitle {
+    final t = title?.trim();
+    if (t != null && t.isNotEmpty) return t;
+    final first = content.split('\n').first.trim();
+    if (first.isNotEmpty) return first;
+    return '公告';
+  }
+
+  String get bodyText {
+    final t = title?.trim();
+    if (t == null || t.isEmpty || !content.startsWith(t)) return content;
+    return content.substring(t.length).trim();
+  }
+
+  String get summary {
+    final source = bodyText.isNotEmpty ? bodyText : content;
+    final t = source.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (t.length <= 60) return t;
+    return '${t.substring(0, 60)}…';
+  }
 
   String get preview {
     final t = content.replaceAll(RegExp(r'\s+'), ' ').trim();

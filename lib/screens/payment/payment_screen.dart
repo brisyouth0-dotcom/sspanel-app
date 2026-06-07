@@ -13,11 +13,15 @@ class PaymentScreen extends StatefulWidget {
     required this.invoiceId,
     required this.planName,
     required this.price,
+    this.periods = const [],
+    this.initialPeriodId,
   });
 
   final String invoiceId;
   final String planName;
   final double price;
+  final List<PlanPeriod> periods;
+  final String? initialPeriodId;
 
   @override
   State<PaymentScreen> createState() => _PaymentScreenState();
@@ -25,12 +29,35 @@ class PaymentScreen extends StatefulWidget {
 
 class _PaymentScreenState extends State<PaymentScreen> {
   String? _selectedGateway;
+  late String _selectedPeriodId;
   final _couponCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedPeriodId = widget.initialPeriodId ??
+        (widget.periods.isNotEmpty ? widget.periods.first.id : '');
+  }
 
   @override
   void dispose() {
     _couponCtrl.dispose();
     super.dispose();
+  }
+
+  PlanPeriod? get _currentPeriod {
+    for (final p in widget.periods) {
+      if (p.id == _selectedPeriodId) return p;
+    }
+    return widget.periods.isNotEmpty ? widget.periods.first : null;
+  }
+
+  double get _displayPrice => _currentPeriod?.price ?? widget.price;
+
+  String get _displayPlanName {
+    final period = _currentPeriod;
+    if (period == null) return widget.planName;
+    return '${widget.planName} · ${period.label}';
   }
 
   Future<void> _pay() async {
@@ -64,6 +91,28 @@ class _PaymentScreenState extends State<PaymentScreen> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
+          if (widget.periods.length > 1) ...[
+            Text('付款周期', style: AppTheme.titleMedium),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: widget.periods.map((period) {
+                final selected = period.id == _selectedPeriodId;
+                return ChoiceChip(
+                  label: Text('${period.label} ¥${period.price.toStringAsFixed(2)}'),
+                  selected: selected,
+                  onSelected: (_) => setState(() => _selectedPeriodId = period.id),
+                  selectedColor: AppColors.primary.withValues(alpha: 0.2),
+                  labelStyle: TextStyle(
+                    color: selected ? AppColors.primary : AppColors.textPrimary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 20),
+          ],
           Row(
             children: [
               Expanded(
@@ -123,13 +172,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
                 children: [
                   Expanded(
                     child: Text(
-                      widget.planName,
+                      _displayPlanName,
                       style: AppTheme.bodySecondary,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   Text(
-                    '¥ ${widget.price.toStringAsFixed(2)}',
+                    '¥ ${_displayPrice.toStringAsFixed(2)}',
                     style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
                   ),
                 ],

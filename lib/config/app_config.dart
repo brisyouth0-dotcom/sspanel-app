@@ -34,5 +34,8 @@ class AppConfig {
   /// Telegram 客服（纸飞机），可在面板后台修改后同步更新
   static const String telegramSupportUrl = 'https://t.me/panlinkvpn';
 
+  /// X（Twitter）官方账号
+  static const String twitterSupportUrl = 'https://x.com/panlinkvpn';
+
   static Uri uri(String path) => Uri.parse('$baseUrl$path');
 }

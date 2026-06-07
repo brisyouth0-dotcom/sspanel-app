@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../models/models.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/node_visuals.dart';
@@ -35,18 +36,29 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final profile = state.profile;
+    final profile = context.select<AppState, UserProfile?>((s) => s.profile);
     if (profile == null) return const SizedBox.shrink();
 
-    final selected = state.nodeById(state.selectedNodeId);
+    final selectedNodeId =
+        context.select<AppState, String?>((s) => s.selectedNodeId);
+    final selected = context.read<AppState>().nodeById(selectedNodeId);
     final daysLeft = profile.expireAt?.difference(DateTime.now()).inDays;
-    final s = state.strings;
+    final s = context.read<AppState>().strings;
+    final isConnected = context.select<AppState, bool>((s) => s.isConnected);
+    final connecting = context.select<AppState, bool>((s) => s.connecting);
+    final mihomoSupported =
+        context.select<AppState, bool>((s) => s.mihomoSupported);
+    final unreadAnnouncements =
+        context.select<AppState, int>((s) => s.unreadAnnouncementCount);
 
     return Stack(
       fit: StackFit.expand,
       children: [
-        HomeAuroraBackground(connected: state.isConnected),
+        Selector<AppState, bool>(
+          selector: (_, state) => state.isConnected,
+          builder: (_, connected, __) =>
+              HomeAuroraBackground(connected: connected),
+        ),
         SafeArea(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -59,23 +71,19 @@ class _HomeScreenState extends State<HomeScreen> {
                     Text(
                       s.welcomeBack,
                       style: AppTheme.titleMedium.copyWith(
-                        color: const Color(0xFF1E293B),
+                        color: Colors.white,
                         fontWeight: FontWeight.w800,
                         shadows: [
                           Shadow(
-                            color: Colors.white.withValues(alpha: 0.85),
-                            blurRadius: 6,
-                          ),
-                          Shadow(
-                            color: Colors.black.withValues(alpha: 0.25),
-                            blurRadius: 8,
+                            color: Colors.black.withValues(alpha: 0.55),
+                            blurRadius: 10,
                             offset: const Offset(0, 1),
                           ),
                         ],
                       ),
                     ),
                     _AnnouncementBell(
-                      count: state.announcements?.length ?? 0,
+                      count: unreadAnnouncements,
                       onTap: () => showAnnouncementDialog(context),
                     ),
                   ],
@@ -84,8 +92,8 @@ class _HomeScreenState extends State<HomeScreen> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
                 child: AppCard(
-                  color: AppColors.card.withValues(alpha: 0.64),
-                  borderColor: AppColors.border.withValues(alpha: 0.46),
+                  color: AppColors.card.withValues(alpha: 0.82),
+                  borderColor: AppColors.border.withValues(alpha: 0.55),
                   child: Row(
                     children: [
                       const AppLogoAvatar(radius: 26),
@@ -144,11 +152,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          state.isConnected ? s.connected : s.disconnected,
+                          isConnected ? s.connected : s.disconnected,
                           style: TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.w800,
-                            color: state.isConnected
+                            color: isConnected
                                 ? const Color(0xFF14532D)
                                 : const Color(0xFF1E293B),
                             shadows: const [
@@ -163,12 +171,13 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 16),
                         ConnectButton(
-                          connected: state.isConnected,
-                          loading: state.connecting,
+                          connected: isConnected,
+                          loading: connecting,
                           connectLabel: s.tapConnect,
                           disconnectLabel: s.tapDisconnect,
                           onTap: () async {
-                            final error = await state
+                            final error = await context
+                                .read<AppState>()
                                 .toggleConnectionWithFeedback();
                             if (!context.mounted) return;
                             if (error != null) {
@@ -180,7 +189,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           const SizedBox(height: 12),
                           _IosExportHint(
                             onCopy: () async {
-                              final err = await state.exportIosSubscription();
+                              final err = await context
+                                  .read<AppState>()
+                                  .exportIosSubscription();
                               if (!context.mounted) return;
                               if (err != null) {
                                 showAppErrorSnackBar(context, err);
@@ -189,9 +200,11 @@ class _HomeScreenState extends State<HomeScreen> {
                               }
                             },
                             onOpenShadowrocket: () async {
-                              final err = await state.exportIosSubscription(
-                                openShadowrocket: true,
-                              );
+                              final err = await context
+                                  .read<AppState>()
+                                  .exportIosSubscription(
+                                    openShadowrocket: true,
+                                  );
                               if (!context.mounted) return;
                               if (err != null) {
                                 showAppErrorSnackBar(context, err);
@@ -204,23 +217,27 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-              if (state.isConnected && state.mihomoSupported)
+              if (isConnected && mihomoSupported)
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: _TrafficPanel(
-                    upload: state.trafficUpBps,
-                    download: state.trafficDownBps,
-                    uploadLabel: s.uploadLabel,
-                    downloadLabel: s.downloadLabel,
-                    remainingLabel: '剩余流量',
-                    remainingValue: _trafficLabel(profile.remainingTrafficGb),
-                    usageText:
-                        '已用 ${_trafficLabel(profile.usedTrafficGb)} / ${_trafficLabel(profile.totalTrafficGb)}',
-                    usagePercent: profile.usagePercent,
-                    title: s.realtimeTraffic,
+                  child: Selector<AppState, (int, int)>(
+                    selector: (_, state) =>
+                        (state.trafficUpBps, state.trafficDownBps),
+                    builder: (_, traffic, __) => _TrafficPanel(
+                      upload: traffic.$1,
+                      download: traffic.$2,
+                      uploadLabel: s.uploadLabel,
+                      downloadLabel: s.downloadLabel,
+                      remainingLabel: '剩余流量',
+                      remainingValue: _trafficLabel(profile.remainingTrafficGb),
+                      usageText:
+                          '已用 ${_trafficLabel(profile.usedTrafficGb)} / ${_trafficLabel(profile.totalTrafficGb)}',
+                      usagePercent: profile.usagePercent,
+                      title: s.realtimeTraffic,
+                    ),
                   ),
                 ),
-              if (state.isConnected && state.mihomoSupported)
+              if (isConnected && mihomoSupported)
                 const SizedBox(height: 10),
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),

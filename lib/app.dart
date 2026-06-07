@@ -1,3 +1,6 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
@@ -80,10 +83,14 @@ class _AuthGateState extends State<_AuthGate> {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
-    final body = !state.initialized
-        ? const SizedBox.shrink()
-        : state.isLoggedIn
+    final initialized =
+        context.select<AppState, bool>((s) => s.initialized);
+    final isLoggedIn = context.select<AppState, bool>((s) => s.isLoggedIn);
+    final body = !initialized
+        ? (!kIsWeb && Platform.isWindows
+            ? const _BootSplash()
+            : const SizedBox.shrink())
+        : isLoggedIn
             ? const MainShell()
             : const LoginScreen();
 
@@ -93,6 +100,35 @@ class _AuthGateState extends State<_AuthGate> {
         body,
         const AppLoadingOverlay(),
       ],
+    );
+  }
+}
+
+class _BootSplash extends StatelessWidget {
+  const _BootSplash();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Image(
+            image: AssetImage('assets/app_icon_store.png'),
+            width: 72,
+            height: 72,
+          ),
+          SizedBox(height: 20),
+          SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(
+              strokeWidth: 2.5,
+              color: AppColors.primary,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

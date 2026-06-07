@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../models/models.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_theme.dart';
+import '../../utils/ping_style.dart';
 
 class NodesScreen extends StatefulWidget {
   const NodesScreen({super.key});
@@ -234,9 +235,7 @@ class _NodeCard extends StatelessWidget {
                   '${node.latencyMs} ms',
                   style: TextStyle(
                     fontWeight: FontWeight.w700,
-                    color: node.latencyMs! < 100
-                        ? AppColors.primary
-                        : AppColors.textPrimary,
+                    color: PingStyle.colorFor(node.latencyMs),
                   ),
                 )
               else

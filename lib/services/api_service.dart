@@ -70,6 +70,8 @@ class ApiService {
 
   Future<List<RechargeRecord>> fetchRecharges() => _api.fetchRecharges();
 
+  Future<bool> cancelOrder(String tradeNo) => _api.cancelOrder(tradeNo);
+
   Future<List<SupportTicket>> fetchTickets() => _api.fetchTickets();
 
   Future<List<Announcement>> fetchAnnouncements() => _api.fetchAnnouncements();
