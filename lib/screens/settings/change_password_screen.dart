@@ -18,6 +18,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
   final _confirmCtrl = TextEditingController();
   var _obscureOld = true;
   var _obscureNew = true;
+  var _submitting = false;
 
   @override
   void dispose() {
@@ -44,24 +45,43 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
       showAppErrorSnackBar(context, s.passwordMismatch);
       return;
     }
-    final ok = await context.read<AppState>().changePassword(
-          oldPassword: old,
-          newPassword: newPwd,
+    if (_submitting) return;
+
+    setState(() => _submitting = true);
+    try {
+      final ok = await context.read<AppState>().changePassword(
+        oldPassword: old,
+        newPassword: newPwd,
+      );
+      if (!mounted) return;
+      if (ok) {
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.surface,
+            title: Text(s.passwordChanged),
+            content: Text(s.passwordReloginHint),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(s.confirm),
+              ),
+            ],
+          ),
         );
-    if (!mounted) return;
-    if (ok) {
-      showAppSnackBar(context, s.passwordChanged);
-      Navigator.pop(context);
-    } else {
-      final err = context.read<AppState>().error;
-      if (err != null) showAppErrorSnackBar(context, err);
+      } else {
+        final err = context.read<AppState>().error;
+        if (err != null) showAppErrorSnackBar(context, err);
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>().strings;
-    final loading = context.watch<AppState>().loading;
 
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -69,8 +89,6 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Text(s.changePasswordDialogBody, style: AppTheme.bodySecondary),
-          const SizedBox(height: 24),
           TextField(
             controller: _oldCtrl,
             obscureText: _obscureOld,
@@ -78,7 +96,9 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
               hintText: s.oldPasswordHint,
               suffixIcon: IconButton(
                 icon: Icon(
-                  _obscureOld ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                  _obscureOld
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
                 ),
                 onPressed: () => setState(() => _obscureOld = !_obscureOld),
               ),
@@ -92,7 +112,9 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
               hintText: s.newPasswordHint,
               suffixIcon: IconButton(
                 icon: Icon(
-                  _obscureNew ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                  _obscureNew
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
                 ),
                 onPressed: () => setState(() => _obscureNew = !_obscureNew),
               ),
@@ -106,13 +128,22 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
           ),
           const SizedBox(height: 28),
           FilledButton(
-            onPressed: loading ? null : _submit,
+            onPressed: _submitting ? null : _submit,
             style: FilledButton.styleFrom(
               minimumSize: const Size(double.infinity, 50),
               backgroundColor: AppColors.primary,
               foregroundColor: AppColors.onPrimary,
             ),
-            child: Text(s.confirmChangePassword),
+            child: _submitting
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.onPrimary,
+                    ),
+                  )
+                : Text(s.confirmChangePassword),
           ),
         ],
       ),

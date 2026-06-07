@@ -6,6 +6,7 @@ import '../../models/models.dart';
 import '../../state/app_state.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_snackbar.dart';
+import 'create_ticket_screen.dart';
 
 class TicketsScreen extends StatefulWidget {
   const TicketsScreen({super.key});
@@ -15,67 +16,62 @@ class TicketsScreen extends StatefulWidget {
 }
 
 class _TicketsScreenState extends State<TicketsScreen> {
+  static const _pageSize = 10;
+
+  final _scrollCtrl = ScrollController();
+  int _visibleCount = _pageSize;
+  bool _refreshing = false;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().loadTickets();
-    });
+    _scrollCtrl.addListener(_onScroll);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadInitial());
   }
 
-  void _showCreateDialog() {
-    final subjectCtrl = TextEditingController();
-    final contentCtrl = TextEditingController();
+  @override
+  void dispose() {
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
 
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: const Text('新建工单'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: subjectCtrl,
-              decoration: const InputDecoration(hintText: '主题'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: contentCtrl,
-              maxLines: 4,
-              decoration: const InputDecoration(hintText: '问题描述'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final subject = subjectCtrl.text.trim();
-              final content = contentCtrl.text.trim();
-              if (subject.isEmpty || content.isEmpty) {
-                showAppErrorSnackBar(ctx, '请填写主题与描述');
-                return;
-              }
-              final ok = await context.read<AppState>().createTicket(
-                subject,
-                content,
-              );
-              if (ctx.mounted) {
-                Navigator.pop(ctx);
-                if (mounted) {
-                  showAppSnackBar(context, ok ? '工单已提交' : '提交失败');
-                }
-              }
-            },
-            child: const Text('提交'),
-          ),
-        ],
-      ),
+  Future<void> _loadInitial() async {
+    await context.read<AppState>().loadTickets(refresh: true, quiet: true);
+  }
+
+  Future<void> _refresh() async {
+    if (_refreshing) return;
+    setState(() {
+      _refreshing = true;
+      _visibleCount = _pageSize;
+    });
+    try {
+      await context.read<AppState>().loadTickets(refresh: true, quiet: true);
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  void _onScroll() {
+    if (!_scrollCtrl.hasClients) return;
+    final max = _scrollCtrl.position.maxScrollExtent;
+    if (_scrollCtrl.position.pixels >= max - 120) {
+      final total = context.read<AppState>().tickets?.length ?? 0;
+      if (_visibleCount < total) {
+        setState(() => _visibleCount += _pageSize);
+      }
+    }
+  }
+
+  Future<void> _openCreate() async {
+    final created = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute<bool>(builder: (_) => const CreateTicketScreen()),
     );
+    if (created == true && mounted) {
+      setState(() => _visibleCount = _pageSize);
+      await _refresh();
+    }
   }
 
   void _openDetail(SupportTicket ticket) {
@@ -93,21 +89,34 @@ class _TicketsScreenState extends State<TicketsScreen> {
   Widget build(BuildContext context) {
     final tickets = context.watch<AppState>().tickets;
     final fmt = DateFormat('MM-dd HH:mm');
+    final visible = tickets?.take(_visibleCount).toList() ?? const <SupportTicket>[];
+    final hasMore = (tickets?.length ?? 0) > _visibleCount;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('工单管理'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => context.read<AppState>().loadTickets(),
+            icon: _refreshing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.primary,
+                    ),
+                  )
+                : const Icon(Icons.refresh),
+            onPressed: _refreshing ? null : _refresh,
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showCreateDialog,
-        label: const Text('新建工单'),
-        icon: const Icon(Icons.add),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _openCreate,
+        backgroundColor: AppColors.primary,
+        foregroundColor: Colors.white,
+        elevation: 4,
+        child: const Icon(Icons.add_rounded, size: 28),
       ),
       body: tickets == null
           ? const Center(
@@ -130,12 +139,29 @@ class _TicketsScreenState extends State<TicketsScreen> {
             )
           : RefreshIndicator(
               color: AppColors.primary,
-              onRefresh: () => context.read<AppState>().loadTickets(),
+              onRefresh: _refresh,
               child: ListView.builder(
+                controller: _scrollCtrl,
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
-                itemCount: tickets.length,
+                itemCount: visible.length + (hasMore ? 1 : 0),
                 itemBuilder: (context, i) {
-                  final t = tickets[i];
+                  if (hasMore && i == visible.length) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(
+                        child: SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                      ),
+                    );
+                  }
+                  final t = visible[i];
                   return Card(
                     margin: const EdgeInsets.only(bottom: 10),
                     child: ListTile(

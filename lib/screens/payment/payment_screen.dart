@@ -32,11 +32,21 @@ class _PaymentScreenState extends State<PaymentScreen> {
   late String _selectedPeriodId;
   final _couponCtrl = TextEditingController();
 
+  bool _loadingMethods = false;
+
   @override
   void initState() {
     super.initState();
     _selectedPeriodId = widget.initialPeriodId ??
         (widget.periods.isNotEmpty ? widget.periods.first.id : '');
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadMethods());
+  }
+
+  Future<void> _loadMethods() async {
+    if (_loadingMethods) return;
+    setState(() => _loadingMethods = true);
+    await context.read<AppState>().preparePaymentForInvoice(widget.invoiceId);
+    if (mounted) setState(() => _loadingMethods = false);
   }
 
   @override
@@ -131,7 +141,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
           const SizedBox(height: 20),
           Text('支付方式', style: AppTheme.titleMedium),
           const SizedBox(height: 12),
-          if (methods.isEmpty)
+          if (_loadingMethods)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: CircularProgressIndicator(color: AppColors.primary),
+              ),
+            )
+          else if (methods.isEmpty)
             AppCard(
               child: Text('未获取到支付方式，请先在面板配置支付网关', style: AppTheme.bodySecondary),
             )
@@ -185,14 +202,21 @@ class _PaymentScreenState extends State<PaymentScreen> {
               ),
               const SizedBox(height: 12),
               FilledButton(
-                onPressed: _pay,
+                onPressed: _loadingMethods ? null : _pay,
                 style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.cardElevated,
-                  foregroundColor: AppColors.textPrimary,
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
                   minimumSize: const Size(double.infinity, 52),
                   shape: const StadiumBorder(),
                 ),
-                child: const Text('立即支付  >'),
+                child: const Text(
+                  '立即支付',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
+                ),
               ),
             ],
           ),

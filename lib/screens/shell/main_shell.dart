@@ -25,15 +25,9 @@ class _MainShellState extends State<MainShell> {
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: IndexedStack(index: index, children: _pages),
-      bottomNavigationBar: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-        child: Container(
-          height: 64,
-          decoration: BoxDecoration(
-            color: AppColors.card.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(28),
-            border: Border.all(color: AppColors.border.withValues(alpha: 0.5)),
-          ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [

@@ -32,7 +32,7 @@ class _StoreScreenState extends State<StoreScreen>
     _tab = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final state = context.read<AppState>();
-      state.loadPlans(force: true);
+      state.loadPlans();
       state.loadRecharges(quiet: true);
     });
   }
@@ -317,6 +317,7 @@ class _BottomPurchaseBar extends StatelessWidget {
         content: const Text('您有未支付的订单，请先完成支付'),
         action: SnackBarAction(
           label: '去支付',
+          textColor: Colors.white,
           onPressed: () => Navigator.push(
             context,
             MaterialPageRoute<void>(builder: (_) => const RechargeScreen()),

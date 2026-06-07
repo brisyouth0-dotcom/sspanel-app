@@ -387,43 +387,42 @@ class _TrafficPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: AppColors.card.withValues(alpha: 0.62),
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(color: AppColors.border.withValues(alpha: 0.44)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              title,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-            ),
-            const SizedBox(height: 12),
             Row(
               children: [
-                Expanded(
-                  child: _SpeedTile(
-                    icon: Icons.arrow_upward_rounded,
-                    color: const Color(0xFF34D399),
-                    label: uploadLabel,
-                    value: formatSpeed(upload),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12,
                   ),
                 ),
+                const Spacer(),
+                _CompactSpeed(
+                  icon: Icons.arrow_upward_rounded,
+                  color: const Color(0xFF34D399),
+                  label: uploadLabel,
+                  value: formatSpeed(upload),
+                ),
                 const SizedBox(width: 12),
-                Expanded(
-                  child: _SpeedTile(
-                    icon: Icons.arrow_downward_rounded,
-                    color: const Color(0xFF60A5FA),
-                    label: downloadLabel,
-                    value: formatSpeed(download),
-                  ),
+                _CompactSpeed(
+                  icon: Icons.arrow_downward_rounded,
+                  color: const Color(0xFF60A5FA),
+                  label: downloadLabel,
+                  value: formatSpeed(download),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             _TrafficQuotaTile(
               label: remainingLabel,
               value: remainingValue,
@@ -437,8 +436,8 @@ class _TrafficPanel extends StatelessWidget {
   }
 }
 
-class _SpeedTile extends StatelessWidget {
-  const _SpeedTile({
+class _CompactSpeed extends StatelessWidget {
+  const _CompactSpeed({
     required this.icon,
     required this.color,
     required this.label,
@@ -452,30 +451,20 @@ class _SpeedTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.card.withValues(alpha: 0.45),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 16, color: color),
-              const SizedBox(width: 4),
-              Text(label, style: AppTheme.bodySecondary.copyWith(fontSize: 11)),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            value,
-            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-          ),
-        ],
-      ),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 13, color: color),
+        const SizedBox(width: 3),
+        Text(
+          '$label ',
+          style: AppTheme.bodySecondary.copyWith(fontSize: 10),
+        ),
+        Text(
+          value,
+          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 11),
+        ),
+      ],
     );
   }
 }
@@ -498,73 +487,48 @@ class _TrafficQuotaTile extends StatelessWidget {
     final percent = usagePercent.clamp(0, 1).toDouble();
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 11),
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
-        color: const Color(0xFFECFDF5).withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(14),
+        color: const Color(0xFFECFDF5).withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: const Color(0xFF34D399).withValues(alpha: 0.32),
+          color: const Color(0xFF34D399).withValues(alpha: 0.28),
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.86),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(
-                  Icons.data_usage_rounded,
-                  color: Color(0xFF10B981),
-                  size: 17,
-                ),
+              const Icon(
+                Icons.data_usage_rounded,
+                color: Color(0xFF10B981),
+                size: 14,
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 6),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      label,
-                      style: AppTheme.bodySecondary.copyWith(
-                        color: const Color(0xFF047857),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      usageText,
-                      style: AppTheme.bodySecondary.copyWith(fontSize: 11),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
+                child: Text(
+                  '$label · $usageText',
+                  style: AppTheme.bodySecondary.copyWith(fontSize: 10),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 10),
               Text(
                 value,
                 style: const TextStyle(
                   color: Color(0xFF064E3B),
-                  fontSize: 16,
+                  fontSize: 13,
                   fontWeight: FontWeight.w800,
                 ),
-                textAlign: TextAlign.right,
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 6),
           ClipRRect(
             borderRadius: BorderRadius.circular(999),
             child: LinearProgressIndicator(
               value: percent,
-              minHeight: 5,
+              minHeight: 4,
               backgroundColor: Colors.white.withValues(alpha: 0.76),
               valueColor: const AlwaysStoppedAnimation<Color>(
                 Color(0xFF10B981),

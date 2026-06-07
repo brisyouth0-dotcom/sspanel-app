@@ -127,6 +127,10 @@ class AppState extends ChangeNotifier {
   List<RechargeRecord> get pendingRecharges =>
       _recharges?.where((r) => r.status == '待支付').toList() ?? const [];
 
+  /// 充值记录（不含已取消）
+  List<RechargeRecord> get visibleRecharges =>
+      _recharges?.where((r) => r.status != '已取消').toList() ?? const [];
+
   RechargeRecord? get firstPendingRecharge =>
       pendingRecharges.isNotEmpty ? pendingRecharges.first : null;
 
@@ -367,7 +371,7 @@ class AppState extends ChangeNotifier {
     _shellTabIndex = index;
     notifyListeners();
     if (index == 1) {
-      loadPlans(force: true);
+      loadPlans();
     }
   }
 
@@ -836,10 +840,6 @@ class AppState extends ChangeNotifier {
         period: period ?? matched?.orderPeriod ?? 'month_price',
         coupon: coupon,
       );
-      _loadingMessage = '正在获取支付方式…';
-      notifyListeners();
-      _paymentMethods = await _api.fetchPaymentMethods(order.invoiceId);
-      notifyListeners();
       return order;
     } on PanelApiException catch (e) {
       _error = e.message;
@@ -857,7 +857,9 @@ class AppState extends ChangeNotifier {
   String paymentUrl(String gateway, String invoiceId) =>
       _api.paymentUrl(gateway, invoiceId: invoiceId);
 
-  Future<void> loadRecharges({bool quiet = false}) async {
+  Future<void> loadRecharges({bool quiet = false, bool refresh = false}) async {
+    if (!refresh && _recharges != null) return;
+
     Future<void> work() async {
       _recharges = await _api.fetchRecharges();
       notifyListeners();
@@ -869,48 +871,73 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<bool> cancelOrder(String tradeNo) async {
+  Future<bool> cancelOrder(String tradeNo, {bool quiet = false}) async {
     _error = null;
-    _beginLoading('正在取消订单…');
-    try {
-      final ok = await _api.cancelOrder(tradeNo);
-      if (ok) {
-        await loadRecharges(quiet: true);
+    Future<bool> work() async {
+      try {
+        final ok = await _api.cancelOrder(tradeNo);
+        if (ok) {
+          await loadRecharges(refresh: true, quiet: true);
+        }
+        return ok;
+      } on PanelApiException catch (e) {
+        _error = e.message;
+        notifyListeners();
+        return false;
+      } catch (e) {
+        _error = UserMessages.networkError(e);
+        notifyListeners();
+        return false;
       }
-      return ok;
-    } on PanelApiException catch (e) {
-      _error = e.message;
-      notifyListeners();
-      return false;
-    } catch (e) {
-      _error = UserMessages.networkError(e);
-      notifyListeners();
-      return false;
-    } finally {
-      _endLoading();
     }
+
+    if (quiet) {
+      return work();
+    }
+    return runWithLoading('正在取消订单…', work);
   }
 
-  Future<void> loadTickets({bool quiet = false}) async {
+  Future<void> loadTickets({bool quiet = false, bool refresh = false}) async {
+    if (!refresh && _tickets != null) return;
+
     Future<void> work() async {
       _tickets = await _api.fetchTickets();
       notifyListeners();
     }
 
-    if (quiet && _loadingCount > 0) {
+    if (quiet) {
       await work();
     } else {
       await runWithLoading('正在加载工单…', work);
     }
   }
 
-  Future<bool> createTicket(String subject, String content) async {
-    return runWithLoading('正在提交工单…', () async {
-      final ok = await _api.createTicket(subject, content);
-      if (ok) await loadTickets(quiet: true);
-      notifyListeners();
-      return ok;
-    });
+  Future<bool> createTicket(
+    String subject,
+    String content, {
+    bool quiet = false,
+  }) async {
+    Future<bool> work() async {
+      try {
+        final ok = await _api.createTicket(subject, content);
+        if (ok) await loadTickets(refresh: true, quiet: true);
+        notifyListeners();
+        return ok;
+      } on PanelApiException catch (e) {
+        _error = e.message;
+        notifyListeners();
+        return false;
+      } catch (e) {
+        _error = UserMessages.networkError(e);
+        notifyListeners();
+        return false;
+      }
+    }
+
+    if (quiet) {
+      return work();
+    }
+    return runWithLoading('正在提交工单…', work);
   }
 
   Future<SupportTicket> fetchTicketDetail(String id) async {
@@ -957,8 +984,7 @@ class AppState extends ChangeNotifier {
           newPassword: newPassword,
         );
       });
-      _sessionPassword = newPassword;
-      notifyListeners();
+      logout();
       return true;
     } on PanelApiException catch (e) {
       _error = e.message;

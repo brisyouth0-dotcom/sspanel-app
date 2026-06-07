@@ -173,6 +173,12 @@ class UiStrings {
   String get passwordMismatch =>
       _t('Passwords do not match', '两次密码不一致', '兩次密碼不一致');
   String get passwordChanged => _t('Password updated', '密码修改成功', '密碼修改成功');
+  String get passwordReloginHint => _t(
+    'Your password has been changed. Please sign in again with your new password.',
+    '密码已修改，请使用新密码重新登录。',
+    '密碼已修改，請使用新密碼重新登入。',
+  );
+  String get confirm => _t('OK', '确定', '確定');
 
   String get about => _t('About', '关于', '關於');
   String aboutSub(String ver) =>

@@ -7,6 +7,7 @@ class SettingsTile extends StatelessWidget {
     super.key,
     required this.icon,
     required this.title,
+    this.leading,
     this.subtitle,
     this.trailing,
     this.onTap,
@@ -15,6 +16,7 @@ class SettingsTile extends StatelessWidget {
   });
 
   final IconData icon;
+  final Widget? leading;
   final String title;
   final String? subtitle;
   final Widget? trailing;
@@ -30,7 +32,8 @@ class SettingsTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Row(
           children: [
-            Icon(icon, color: iconColor ?? AppColors.textSecondary, size: 22),
+            leading ??
+                Icon(icon, color: iconColor ?? AppColors.textSecondary, size: 22),
             const SizedBox(width: 14),
             Expanded(
               child: Column(

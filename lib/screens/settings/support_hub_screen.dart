@@ -7,6 +7,7 @@ import '../../state/app_state.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/app_snackbar.dart';
 import '../../widgets/settings_tile.dart';
+import '../../widgets/x_logo_icon.dart';
 import '../profile/tickets_screen.dart';
 
 class SupportHubScreen extends StatefulWidget {
@@ -72,6 +73,7 @@ class _SupportHubScreenState extends State<SupportHubScreen> {
                 ),
               ),
               SettingsTile(
+                leading: const XLogoIcon(size: 22),
                 icon: Icons.tag,
                 title: 'X',
                 subtitle: '跳转 X 官方账号',
