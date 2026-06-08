@@ -4,20 +4,33 @@ import android.os.Build
 
 /**
  * 按机型调整 VPN 参数。
- * - 鸿蒙系：虚拟 DNS、关 IPv6、拦截 QUIC/DoT、系统 HTTP 代理（浏览器）
- * - 国产 OEM：同鸿蒙系 DNS 策略
- * - 原生 Android（Google Pixel 等）：hev UDP-in-TCP（与 mihomo 最稳）、放行 QUIC（TikTok）
+ * - 鸿蒙/华为：纯 TUN+mapdns（172.19.0.2）、hev TCP 中继、放行 QUIC（Google/YouTube）
+ * - 国产 OEM（小米/OPPO 等）：HTTP 代理兜底、拦截 QUIC/DoT
+ * - 原生 Android（Pixel 等）：纯 TUN+mapdns（198.18.0.2）、hev UDP、放行 QUIC
  */
 object DeviceVpnProfile {
-    /** hev mapdns 虚拟 DNS */
-    const val VIRTUAL_DNS = "172.19.0.2"
+    /** Android VPN TUN 网关（系统 HTTP 代理指向 mixed-port，走 TUN 数据面） */
+    const val TUN_GATEWAY = "172.19.0.1"
+
+    /**
+     * hev / 本进程连 mihomo mixed-port。
+     * 本 App 已 [VpnService.Builder.addDisallowedApplication]，须走 127.0.0.1 而非 TUN 网关。
+     */
+    const val MIHOMO_SOCKS_HOST = "127.0.0.1"
+
+    /**
+     * hev mapdns 虚拟 DNS。
+     * 鸿蒙对 198.18.0.0/15 兼容差，用 TUN 同网段 172.19.0.2；Pixel 等用 sockstun 惯例 198.18.0.2。
+     */
+    val virtualDns: String
+        get() = if (kind == Kind.HARMONY) "172.19.0.2" else "198.18.0.2"
 
     /**
      * Android VPN 下发的 DNS。
-     * builtin TUN 无 mapdns，须用 TUN 网关；hev 路径用 [VIRTUAL_DNS] 交给 mapdns。
+     * builtin TUN 无 mapdns，须用 TUN 网关；hev 路径用 [virtualDns] 交给 mapdns。
      */
     val tunnelDnsServer: String
-        get() = if (useMihomoBuiltinTun) "172.19.0.1" else VIRTUAL_DNS
+        get() = if (useMihomoBuiltinTun) "172.19.0.1" else virtualDns
 
     enum class Kind {
         /** 华为 / 鸿蒙 / WIKO 等 */
@@ -52,25 +65,28 @@ object DeviceVpnProfile {
     val useMihomoBuiltinTun: Boolean
         get() = false
 
-    /** hev SOCKS5 UDP 中继：全 Android 用 udp（与 mihomo mixed-port 最匹配） */
+    /** hev SOCKS5 UDP 中继：鸿蒙 UDP 不稳定改 tcp；其余机型 udp */
     val hevUdpMode: String
-        get() = "udp"
+        get() = if (kind == Kind.HARMONY) "tcp" else "udp"
 
-    /** TUN 读包模式：非阻塞在部分 Pixel 上会导致 0 流量 */
+    /** TUN 阻塞读：Pixel / 鸿蒙 上非阻塞易导致 0 流量 */
     val tunBlocking: Boolean
-        get() = kind == Kind.STOCK
+        get() = kind == Kind.STOCK || kind == Kind.HARMONY
 
-    /** TikTok 等依赖 QUIC(UDP/443)，原生 Android 上不要拦截 */
+    /** 仅国产 OEM 拦截 QUIC；鸿蒙/Pixel 访问 Google/YouTube 需放行 UDP/443 */
     val blockQuic: Boolean
-        get() = kind != Kind.STOCK
+        get() = kind == Kind.OEM_CHINA
 
     /** 私人 DNS(DoT) 绕过 mapdns；Pixel 也建议拦截（Android 私人 DNS 很常见） */
     val blockDoT: Boolean
         get() = true
 
-    /** 浏览器 DoH 不走 mapdns，鸿蒙/国产 ROM 用系统 HTTP 代理兜底 */
+    /**
+     * 系统 HTTP 代理 → TUN 网关 mixed-port。
+     * 仅小米/OPPO 等 OEM 启用；鸿蒙/Pixel 走纯 TUN+mapdns（HTTP 代理在鸿蒙上易导致 Google 离线）。
+     */
     val useHttpProxy: Boolean
-        get() = kind != Kind.STOCK
+        get() = kind == Kind.OEM_CHINA
 
     fun toChannelMap(): Map<String, Any> = mapOf(
         "kind" to kind.name,

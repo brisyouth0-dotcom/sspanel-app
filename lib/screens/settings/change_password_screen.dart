@@ -58,18 +58,24 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
         await showDialog<void>(
           context: context,
           barrierDismissible: false,
-          builder: (ctx) => AlertDialog(
+          builder: (dialogCtx) => AlertDialog(
             backgroundColor: AppColors.surface,
             title: Text(s.passwordChanged),
             content: Text(s.passwordReloginHint),
             actions: [
               FilledButton(
-                onPressed: () => Navigator.pop(ctx),
+                onPressed: () => Navigator.pop(dialogCtx),
                 child: Text(s.confirm),
               ),
             ],
           ),
         );
+        if (!mounted) return;
+        await context.read<AppState>().logout();
+        if (!mounted) return;
+        // 改密页在根 Navigator 上，登出后需弹出才能露出登录页
+        Navigator.of(context, rootNavigator: true)
+            .popUntil((route) => route.isFirst);
       } else {
         final err = context.read<AppState>().error;
         if (err != null) showAppErrorSnackBar(context, err);

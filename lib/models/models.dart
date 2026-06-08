@@ -153,6 +153,25 @@ class OrderResult {
   final String redirectPath;
 }
 
+/// Xboard checkout 返回：type 0=二维码内容，1=支付链接
+class CheckoutResult {
+  const CheckoutResult({required this.type, required this.data});
+
+  final int type;
+  final String data;
+
+  bool get isPaymentUrl {
+    final s = data.trim().toLowerCase();
+    return type == 1 ||
+        s.startsWith('http://') ||
+        s.startsWith('https://') ||
+        s.startsWith('alipays://') ||
+        s.startsWith('alipay://') ||
+        s.startsWith('weixin://') ||
+        s.startsWith('wxp://');
+  }
+}
+
 class RechargeRecord {
   const RechargeRecord({
     required this.id,
@@ -160,6 +179,8 @@ class RechargeRecord {
     required this.method,
     required this.createdAt,
     required this.status,
+    this.planName,
+    this.periodLabel,
   });
 
   final String id;
@@ -167,6 +188,8 @@ class RechargeRecord {
   final String method;
   final DateTime createdAt;
   final String status;
+  final String? planName;
+  final String? periodLabel;
 }
 
 class SupportTicket {

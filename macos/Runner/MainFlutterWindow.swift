@@ -111,6 +111,7 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         let nodeName = args["nodeName"] as? String
         let mode = args["mode"] as? String
         let selectedNodeId = args["selectedNodeId"] as? String
+        let autoSelectActive = args["autoSelectActive"] as? Bool ?? false
         let nodesRaw = args["nodes"] as? [[String: Any]] ?? []
         let nodes = nodesRaw.map { entry -> [String: String] in
           [
@@ -123,7 +124,8 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
           nodeName: nodeName,
           mode: mode,
           nodes: nodes,
-          selectedNodeId: selectedNodeId
+          selectedNodeId: selectedNodeId,
+          autoSelectActive: autoSelectActive
         )
         result(nil)
       default:

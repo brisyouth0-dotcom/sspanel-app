@@ -7,38 +7,36 @@ import java.io.File
 object ConfigYamlPinner {
     private const val TAG = "ConfigYamlPinner"
 
+    private val sinkGroupNames = setOf(
+        "COMPATIBLE",
+        "自动选择",
+        "🚀 自动选择",
+        "♻️ 自动选择",
+        "故障转移",
+        "Auto",
+        "AUTO",
+        "DIRECT",
+        "REJECT",
+        "GLOBAL",
+    )
+
     @Volatile
     var lastPinnedPath: String? = null
         private set
 
+    @Volatile
+    var lastPinSucceeded: Boolean = false
+        private set
+
     fun pin(configPath: String, nodeLabel: String?): String {
+        // 不改写 YAML：文本 pin 易破坏 proxy-groups 缩进，选路由 MihomoRouting API 完成
+        lastPinSucceeded = false
+        lastPinnedPath = configPath
         val label = nodeLabel?.trim().orEmpty()
-        if (label.isEmpty() || label == "—") {
-            lastPinnedPath = configPath
-            return configPath
+        if (label.isNotEmpty() && label != "—") {
+            Log.i(TAG, "skip yaml pin proxy=$label use=${configPath}")
         }
-        val file = File(configPath)
-        if (!file.exists()) {
-            lastPinnedPath = configPath
-            return configPath
-        }
-        return try {
-            val yaml = file.readText()
-            val leafNames = parseLeafNames(yaml)
-            val resolved = resolveProxyName(label, leafNames) ?: run {
-                Log.w(TAG, "no leaf match for $label")
-                return configPath
-            }
-            val pinned = reorderProxyGroups(yaml, resolved)
-            val out = File(file.parentFile, "config.pinned.yaml")
-            out.writeText(pinned)
-            lastPinnedPath = out.absolutePath
-            Log.i(TAG, "pinned proxy=$resolved -> ${out.absolutePath}")
-            out.absolutePath
-        } catch (e: Exception) {
-            Log.w(TAG, "pin failed: ${e.message}")
-            configPath
-        }
+        return configPath
     }
 
     private fun parseLeafNames(yaml: String): List<String> {
@@ -84,13 +82,10 @@ object ConfigYamlPinner {
                     e.trim().removePrefix("- ").trim().trim('"', '\'')
                 }
                 val selected = entries.filter { nameOf(it) == resolved }
-                val directReject = entries.filter {
-                    val n = nameOf(it)
-                    n == "DIRECT" || n == "REJECT"
-                }
+                val sunk = entries.filter { nameOf(it) in sinkGroupNames }
                 val others = entries.filter {
                     val n = nameOf(it)
-                    n != resolved && n != "DIRECT" && n != "REJECT"
+                    n != resolved && n !in sinkGroupNames
                 }
                 if (selected.isEmpty()) {
                     val quoted = if (resolved.contains('[') || resolved.contains(':')) {
@@ -103,36 +98,13 @@ object ConfigYamlPinner {
                     out.addAll(selected)
                 }
                 out.addAll(others)
-                out.addAll(directReject)
+                out.addAll(sunk)
                 continue
             }
             out.add(line)
             i++
         }
         return out.joinToString("\n")
-    }
-
-    private fun resolveProxyName(nodeLabel: String, leafNames: List<String>): String? {
-        val trimmed = nodeLabel.trim()
-        val normNode = normalizeLabel(trimmed)
-        for (name in leafNames) {
-            if (name == trimmed) return name
-        }
-        for (name in leafNames) {
-            if (normalizeLabel(name) == normNode) return name
-        }
-        for (name in leafNames) {
-            val norm = normalizeLabel(name)
-            if (norm.contains(normNode) || normNode.contains(norm)) return name
-            if (name.contains(trimmed) || trimmed.contains(name)) return name
-        }
-        return null
-    }
-
-    private fun normalizeLabel(name: String): String {
-        var s = name.trim()
-        s = s.replace(Regex("^[📶🚀🔰\\s]+"), "")
-        return s.replace(Regex("[\\s\\-_·•]"), "").lowercase()
     }
 
     private fun String.indexOfFirstLine(key: String): Int {

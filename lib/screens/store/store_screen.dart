@@ -302,7 +302,7 @@ class _EmptyState extends StatelessWidget {
 // 底部购买栏
 // ═══════════════════════════════════════════════════════════════
 
-class _BottomPurchaseBar extends StatelessWidget {
+class _BottomPurchaseBar extends StatefulWidget {
   const _BottomPurchaseBar({
     required this.plan,
     required this.selectedPeriod,
@@ -310,6 +310,12 @@ class _BottomPurchaseBar extends StatelessWidget {
 
   final ShopPlan plan;
   final PlanPeriod selectedPeriod;
+
+  @override
+  State<_BottomPurchaseBar> createState() => _BottomPurchaseBarState();
+}
+
+class _BottomPurchaseBarState extends State<_BottomPurchaseBar> {
 
   void _showPendingSnackBar(BuildContext context) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -329,72 +335,83 @@ class _BottomPurchaseBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppState>();
+    final ordering = context.select<AppState, bool>((s) => s.ordering);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: SafeArea(
         top: false,
         child: FilledButton(
-              onPressed: state.loading
-                  ? null
-                  : () async {
-                      final order = await state.createOrder(
-                        plan.id,
-                        period: selectedPeriod.id,
-                      );
-                      if (!context.mounted) return;
-                      if (order == null) {
-                        if (state.pendingRecharges.isNotEmpty) {
-                          _showPendingSnackBar(context);
-                        } else if (state.error != null) {
-                          showAppErrorSnackBar(context, state.error!);
-                        }
-                        return;
-                      }
-                      if (!context.mounted) return;
-                      await Navigator.push(
-                        context,
-                        MaterialPageRoute<void>(
-                          builder: (_) => PaymentScreen(
-                            invoiceId: order.invoiceId,
-                            planName: plan.name,
-                            price: selectedPeriod.price,
-                            periods: plan.availablePeriods,
-                            initialPeriodId: selectedPeriod.id,
-                          ),
-                        ),
-                      );
-                    },
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                foregroundColor: Colors.white,
-                minimumSize: const Size(double.infinity, 46),
-                shape: const StadiumBorder(),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text(
-                    '立即支付',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
+          onPressed: ordering
+              ? null
+              : () async {
+                  final state = context.read<AppState>();
+                  final order = await state.createOrder(
+                    widget.plan.id,
+                    period: widget.selectedPeriod.id,
+                    quiet: true,
+                  );
+                  if (!context.mounted) return;
+                  if (order == null) {
+                    if (state.pendingRecharges.isNotEmpty) {
+                      _showPendingSnackBar(context);
+                    } else if (state.error != null) {
+                      showAppErrorSnackBar(context, state.error!);
+                    }
+                    return;
+                  }
+                  if (!context.mounted) return;
+                  await Navigator.push<void>(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => PaymentScreen(
+                        invoiceId: order.invoiceId,
+                        planName: widget.plan.name,
+                        price: widget.selectedPeriod.price,
+                        periods: widget.plan.availablePeriods,
+                        initialPeriodId: widget.selectedPeriod.id,
+                      ),
                     ),
+                  );
+                },
+          style: FilledButton.styleFrom(
+            backgroundColor: AppColors.primary,
+            foregroundColor: Colors.white,
+            minimumSize: const Size(double.infinity, 46),
+            shape: const StadiumBorder(),
+          ),
+          child: ordering
+              ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Colors.white,
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '¥ ${selectedPeriod.price.toStringAsFixed(2)}',
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
+                )
+              : Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text(
+                      '立即支付',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '¥ ${widget.selectedPeriod.price.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+        ),
       ),
     );
   }
@@ -596,7 +613,11 @@ class _MetaChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 14, color: AppColors.textSecondary),
+          Icon(
+            icon,
+            size: 14,
+            color: valueText == null ? AppColors.textSecondary : AppColors.primary,
+          ),
           const SizedBox(width: 4),
           if (valueText == null)
             Text(
@@ -613,7 +634,7 @@ class _MetaChip extends StatelessWidget {
                 prefix,
                 style: const TextStyle(
                   fontSize: 13,
-                  color: AppColors.textSecondary,
+                  color: AppColors.primary,
                 ),
               ),
             if (prefix.isNotEmpty) const SizedBox(width: 4),

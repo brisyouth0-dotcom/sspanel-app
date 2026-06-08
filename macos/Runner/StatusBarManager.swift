@@ -12,6 +12,7 @@ final class StatusBarManager: NSObject {
   private var mode = "rule"
   private var nodes: [[String: String]] = []
   private var selectedNodeId = ""
+  private var autoSelectActive = false
 
   func configure(messenger: FlutterBinaryMessenger) {
     self.messenger = messenger
@@ -24,13 +25,15 @@ final class StatusBarManager: NSObject {
     nodeName: String?,
     mode: String?,
     nodes: [[String: String]]?,
-    selectedNodeId: String?
+    selectedNodeId: String?,
+    autoSelectActive: Bool?
   ) {
     self.connected = connected
     self.nodeName = nodeName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     self.mode = mode ?? "rule"
     self.nodes = nodes ?? []
     self.selectedNodeId = selectedNodeId ?? ""
+    self.autoSelectActive = autoSelectActive ?? false
     installStatusItemIfNeeded()
     rebuildMenu()
     updateButtonAppearance()
@@ -93,6 +96,15 @@ final class StatusBarManager: NSObject {
     addModeItem(menu, title: "规则", mode: "rule")
     addModeItem(menu, title: "全局", mode: "global")
     addModeItem(menu, title: "直连", mode: "direct")
+
+    menu.addItem(.separator())
+
+    let autoItem = NSMenuItem(title: "自动选择", action: #selector(selectAuto), keyEquivalent: "")
+    autoItem.target = self
+    if autoSelectActive {
+      autoItem.state = .on
+    }
+    menu.addItem(autoItem)
 
     menu.addItem(.separator())
 
@@ -164,6 +176,10 @@ final class StatusBarManager: NSObject {
   @objc private func selectNode(_ sender: NSMenuItem) {
     guard let nodeId = sender.representedObject as? String, !nodeId.isEmpty else { return }
     invokeFlutter(action: "selectNode", extra: ["nodeId": nodeId])
+  }
+
+  @objc private func selectAuto() {
+    invokeFlutter(action: "selectAuto")
   }
 
   @objc private func quitApp() {

@@ -35,6 +35,10 @@ class XboardHttpClient {
 
   String? get authData => _authData;
 
+  void clearAuthDataLocally() {
+    _authData = null;
+  }
+
   Future<void> setAuthData(String? token) async {
     _authData = token;
     final prefs = await SharedPreferences.getInstance();

@@ -35,7 +35,9 @@ class ApiService {
   Future<void> sendEmailCode(String email, {String context = 'register'}) =>
       _api.sendEmailCode(email, context: context);
 
-  void logout() => _api.logout();
+  void signOutLocally() => _api.signOutLocally();
+
+  Future<void> logout() => _api.logout();
 
   Future<void> refreshUser() => _api.refreshUser();
 
@@ -65,6 +67,9 @@ class ApiService {
 
   String paymentUrl(String gateway, {String? invoiceId}) =>
       _api.paymentUrl(gateway, invoiceId: invoiceId);
+
+  Future<CheckoutResult> checkoutOrder(String tradeNo, String methodId) =>
+      _api.checkoutOrder(tradeNo, methodId);
 
   Future<bool> purchasePlan(String planId) => _api.purchasePlan(planId);
 

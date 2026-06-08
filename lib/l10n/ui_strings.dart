@@ -54,9 +54,9 @@ class UiStrings {
   );
 
   String daysLeftLine(int daysLeft) {
-    if (daysLeft > 3650) return _t('Unlimited', '∞ 天剩余', '∞ 天剩餘');
+    if (daysLeft > 3650) return _t('Unlimited', '永久有效', '永久有效');
     if (daysLeft > 0) {
-      return _t('$daysLeft days left', '$daysLeft 天剩余', '$daysLeft 天剩餘');
+      return _t('$daysLeft days left', '剩余$daysLeft天', '剩餘$daysLeft天');
     }
     return expiredStatus;
   }

@@ -1,4 +1,5 @@
 import '../models/models.dart';
+import 'proxy_name_match.dart';
 
 /// 订阅里用于展示流量/到期信息的“伪节点”，不是可连接服务器
 bool isSubscriptionInfoNode(String name) {
@@ -30,4 +31,24 @@ bool isSubscriptionInfoNode(String name) {
 
 List<VpnNode> filterConnectableNodes(Iterable<VpnNode> nodes) {
   return nodes.where((n) => !isSubscriptionInfoNode(n.name)).toList();
+}
+
+/// Clash 配置里可连接的代理名（排除流量/到期信息项）
+bool isConnectableProxyName(String name) {
+  final n = name.trim();
+  if (n.isEmpty || n == 'DIRECT' || n == 'REJECT') return false;
+  return !isSubscriptionInfoNode(n);
+}
+
+/// 过滤自动选择结果，避免 DIRECT / COMPATIBLE 等策略组名进入 UI
+String? sanitizeProxyLeaf(
+  String? name, {
+  Map<String, dynamic>? proxies,
+}) {
+  if (name == null) return null;
+  final t = name.trim();
+  if (!isConnectableProxyName(t)) return null;
+  if (isReservedOutboundName(t)) return null;
+  if (proxies != null && !isRealOutboundProxy(t, proxies)) return null;
+  return t;
 }

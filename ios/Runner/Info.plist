@@ -45,5 +45,14 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>https</string>
+		<string>http</string>
+		<string>alipays</string>
+		<string>alipay</string>
+		<string>weixin</string>
+		<string>wxp</string>
+	</array>
 </dict>
 </plist>

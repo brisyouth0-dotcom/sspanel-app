@@ -1,5 +1,3 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -87,9 +85,7 @@ class _AuthGateState extends State<_AuthGate> {
         context.select<AppState, bool>((s) => s.initialized);
     final isLoggedIn = context.select<AppState, bool>((s) => s.isLoggedIn);
     final body = !initialized
-        ? (!kIsWeb && Platform.isWindows
-            ? const _BootSplash()
-            : const SizedBox.shrink())
+        ? const _BootSplash()
         : isLoggedIn
             ? const MainShell()
             : const LoginScreen();

@@ -140,6 +140,12 @@ class SspanelApi {
   }
 
   Future<void> logout() async {
+    _profile = null;
+    _config = null;
+    _connected = false;
+    _selectedNodeId = null;
+    _email = null;
+    _legacyApi = null;
     try {
       await _http.get('/auth/logout');
     } catch (_) {}
@@ -147,12 +153,6 @@ class SspanelApi {
       await _http.get('/user/logout');
     } catch (_) {}
     await _http.clearCookies();
-    _profile = null;
-    _config = null;
-    _connected = false;
-    _selectedNodeId = null;
-    _email = null;
-    _legacyApi = null;
   }
 
   Future<void> refreshUser() async {
@@ -398,6 +398,13 @@ class SspanelApi {
       methods = SspanelParsers.paymentMethodsFromHtml(_http.responseBody(money));
     }
     return methods;
+  }
+
+  Future<CheckoutResult> checkoutOrder(String tradeNo, String methodId) async {
+    return CheckoutResult(
+      type: 1,
+      data: paymentUrl(methodId, invoiceId: tradeNo),
+    );
   }
 
   String paymentUrl(String gateway, {String? invoiceId}) {

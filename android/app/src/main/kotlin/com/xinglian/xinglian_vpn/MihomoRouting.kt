@@ -1,5 +1,6 @@
 package com.kele.kele_vpn
 
+import android.net.Uri
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -12,11 +13,27 @@ object MihomoRouting {
     private const val TAG = "MihomoRouting"
 
     private val selectorGroups = listOf(
+        "灵猫加速器",
         "🚀 节点选择",
         "节点选择",
         "Proxy",
         "PROXY",
-        "灵猫加速器",
+    )
+
+    private val metaGroupNames = setOf(
+        "COMPATIBLE",
+        "自动选择",
+        "🚀 自动选择",
+        "♻️ 自动选择",
+        "故障转移",
+        "Auto",
+        "AUTO",
+    )
+
+    private val delayTestUrls = listOf(
+        "http://www.gstatic.com/generate_204",
+        "http://cp.cloudflare.com/generate_204",
+        "https://www.gstatic.com/generate_204",
     )
 
     /** TUN 已建立后选路（须 protect，避免 API 套接字被 TUN 吞掉） */
@@ -26,19 +43,23 @@ object MihomoRouting {
         applyBeforeTunnel(nodeLabel, protect = false)
 
     private fun applyBeforeTunnel(nodeLabel: String?, protect: Boolean): Boolean {
-        val label = nodeLabel?.trim().orEmpty()
-        if (label.isEmpty() || label == "—") {
-            Log.w(TAG, "no node label, skip routing")
-            return false
-        }
-        if (!MihomoReachability.waitForController(maxMs = 15000)) {
+        if (!MihomoReachability.waitForController(maxMs = 5000)) {
             Log.w(TAG, "controller not ready, rely on config pin")
             return false
         }
+        var label = nodeLabel?.trim().orEmpty()
+        if (label.isEmpty() || label == "—") {
+            label = resolveDefaultLeaf(protect).orEmpty()
+            if (label.isEmpty()) {
+                Log.w(TAG, "no node label, skip routing")
+                return false
+            }
+            Log.i(TAG, "auto default leaf=$label")
+        }
         return try {
-            for (attempt in 1..5) {
+            for (attempt in 1..2) {
                 if (applyOnce(label, protect = protect)) return true
-                Thread.sleep(400)
+                Thread.sleep(150)
             }
             Log.w(TAG, "routing API failed after retries, rely on config pin")
             false
@@ -49,25 +70,40 @@ object MihomoRouting {
     }
 
     private fun applyOnce(label: String, protect: Boolean): Boolean {
-        if (!patchMode("global", protect)) {
-            Log.w(TAG, "set global mode failed")
+        // rule + 精简 rules（MATCH,GLOBAL + 拦截 DoT）；global 模式不执行 rules 会导致私人 DNS 绕过
+        if (!patchMode("rule", protect)) {
+            Log.w(TAG, "set rule mode failed")
         }
         val proxies = fetchProxies(protect) ?: run {
             Log.w(TAG, "fetch proxies failed")
             return false
         }
-        val resolved = resolveProxyName(label, proxies) ?: run {
+        val resolved = resolveLeafProxyName(label, proxies) ?: run {
             Log.w(TAG, "no proxy match for: $label")
             return false
         }
         val ok = applyChain(proxies, resolved, protect)
         if (ok) {
             closeConnections(protect)
+            val now = readMainGroupNow(protect)
+            if (now != null && now != resolved) {
+                Log.w(TAG, "main group now=$now expected=$resolved")
+            }
             Log.i(TAG, "routing chain ok proxy=$resolved")
         } else {
             Log.w(TAG, "routing chain failed proxy=$resolved")
         }
         return ok
+    }
+
+    private fun readMainGroupNow(protect: Boolean): String? {
+        val proxies = fetchProxies(protect) ?: return null
+        for (group in selectorGroups) {
+            if (!proxies.has(group)) continue
+            val now = proxies.optJSONObject(group)?.optString("now")?.trim()
+            if (!now.isNullOrEmpty()) return now
+        }
+        return null
     }
 
     /** TUN 已建立后切换节点（需 protect 套接字） */
@@ -136,35 +172,41 @@ object MihomoRouting {
         return false
     }
 
-    private fun resolveProxyName(nodeLabel: String, proxies: JSONObject): String? {
-        val trimmed = nodeLabel.trim()
-        val normNode = normalizeLabel(trimmed)
+    /** 未指定节点时，从订阅叶子中挑默认出站（优先 x1.0 倍率） */
+    fun resolveDefaultLeaf(protect: Boolean): String? {
+        val proxies = fetchProxies(protect) ?: return null
         val leaves = mutableListOf<String>()
         val groupTypes = setOf("Selector", "URLTest", "Fallback", "LoadBalance", "Relay")
         for (key in proxies.keys()) {
             val item = proxies.optJSONObject(key) ?: continue
-            if (!groupTypes.contains(item.optString("type"))) {
+            if (!groupTypes.contains(item.optString("type")) && !isReservedName(key)) {
                 leaves.add(key)
             }
         }
         for (name in leaves) {
-            if (name == trimmed) return name
+            if (Regex("\\[x[\\d.]+\\]", RegexOption.IGNORE_CASE).containsMatchIn(name)) {
+                return name
+            }
         }
-        for (name in leaves) {
-            if (normalizeLabel(name) == normNode) return name
+        for (group in selectorGroups) {
+            val now = proxies.optJSONObject(group)?.optString("now")?.trim()
+            if (!now.isNullOrEmpty()) {
+                resolveLeafProxyName(now, proxies)?.let { return it }
+            }
         }
-        for (name in leaves) {
-            val norm = normalizeLabel(name)
-            if (norm.contains(normNode) || normNode.contains(norm)) return name
-            if (name.contains(trimmed) || trimmed.contains(name)) return name
-        }
-        return null
+        return leaves.firstOrNull()
     }
 
-    private fun normalizeLabel(name: String): String {
-        var s = name.trim()
-        s = s.replace(Regex("^[📶🚀🔰\\s]+"), "")
-        return s.replace(Regex("[\\s\\-_·•]"), "").lowercase()
+    private fun resolveLeafProxyName(nodeLabel: String, proxies: JSONObject): String? {
+        val leaves = mutableListOf<String>()
+        val groupTypes = setOf("Selector", "URLTest", "Fallback", "LoadBalance", "Relay")
+        for (key in proxies.keys()) {
+            val item = proxies.optJSONObject(key) ?: continue
+            if (!groupTypes.contains(item.optString("type")) && !isReservedName(key)) {
+                leaves.add(key)
+            }
+        }
+        return ProxyNameMatcher.resolve(nodeLabel, leaves)
     }
 
     private fun fetchProxies(protect: Boolean = false): JSONObject? {
@@ -188,7 +230,7 @@ object MihomoRouting {
     }
 
     private fun selectProxy(group: String, proxy: String, protect: Boolean = false): Boolean {
-        val encoded = java.net.URLEncoder.encode(group, "UTF-8").replace("+", "%20")
+        val encoded = encodeApiPath(group)
         val payload = JSONObject().put("name", proxy).toString()
         val resp = MihomoHttpClient.request(
             "PUT",
@@ -205,43 +247,65 @@ object MihomoRouting {
         return MihomoHttpClient.isSuccess(resp.statusCode)
     }
 
+    private fun encodeApiPath(segment: String): String =
+        Uri.encode(segment, "UTF-8")
+
     /** 经 mihomo 对选中节点做延迟测试，验证代理出站是否可达 */
     fun measureProxyDelay(
         nodeLabel: String?,
         protect: Boolean,
-        timeoutMs: Int = 8000,
+        timeoutMs: Int = 15000,
     ): Long? {
         val label = nodeLabel?.trim().orEmpty()
         if (label.isEmpty() || label == "—") return null
         val proxies = fetchProxies(protect) ?: return null
-        val resolved = resolveProxyName(label, proxies) ?: return null
-        val encoded = java.net.URLEncoder.encode(resolved, "UTF-8").replace("+", "%20")
-        val testUrl = java.net.URLEncoder.encode(
-            "http://www.gstatic.com/generate_204",
-            "UTF-8",
-        )
-        val resp = MihomoHttpClient.request(
-            "GET",
-            "/proxies/$encoded/delay?url=$testUrl&timeout=$timeoutMs",
-            protect = protect,
-            timeoutMs = timeoutMs + 3000,
-        ) ?: return null
-        if (!MihomoHttpClient.isSuccess(resp.statusCode)) {
-            Log.w(TAG, "delay test HTTP ${resp.statusCode} proxy=$resolved")
-            return null
-        }
-        return try {
-            val delay = JSONObject(resp.body).optLong("delay", -1L)
-            if (delay > 0) {
-                Log.i(TAG, "delay test $resolved -> ${delay}ms")
-                delay
-            } else {
-                Log.w(TAG, "delay test failed proxy=$resolved body=${resp.body.take(80)}")
-                null
+        val resolved = resolveLeafProxyName(label, proxies) ?: return null
+        return requestDelay(resolved, protect, timeoutMs)
+    }
+
+    private fun requestDelay(
+        proxyOrGroup: String,
+        protect: Boolean,
+        timeoutMs: Int,
+    ): Long? {
+        val encoded = encodeApiPath(proxyOrGroup)
+        for (rawUrl in delayTestUrls) {
+            val testUrl = Uri.encode(rawUrl, "UTF-8")
+            val resp = MihomoHttpClient.request(
+                "GET",
+                "/proxies/$encoded/delay?url=$testUrl&timeout=$timeoutMs",
+                protect = protect,
+                timeoutMs = timeoutMs + 3000,
+            ) ?: continue
+            if (!MihomoHttpClient.isSuccess(resp.statusCode)) {
+                Log.w(
+                    TAG,
+                    "delay test HTTP ${resp.statusCode} proxy=$proxyOrGroup " +
+                        "url=$rawUrl body=${resp.body.take(120)}",
+                )
+                continue
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "delay parse: ${e.message}")
-            null
+            try {
+                val delay = JSONObject(resp.body).optLong("delay", -1L)
+                if (delay > 0) {
+                    Log.i(TAG, "delay test $proxyOrGroup -> ${delay}ms url=$rawUrl")
+                    return delay
+                }
+                Log.w(
+                    TAG,
+                    "delay test failed proxy=$proxyOrGroup url=$rawUrl " +
+                        "body=${resp.body.take(120)}",
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "delay parse: ${e.message}")
+            }
         }
+        return null
+    }
+
+    private fun isReservedName(name: String): Boolean {
+        val n = name.trim().uppercase()
+        return n == "GLOBAL" || n == "DIRECT" || n == "REJECT" ||
+            n == "COMPATIBLE" || n == "PASS"
     }
 }

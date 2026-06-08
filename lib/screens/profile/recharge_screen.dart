@@ -85,21 +85,29 @@ class _RechargeScreenState extends State<RechargeScreen> {
     }
   }
 
+  List<PlanPeriod> _periodsForRecord(RechargeRecord record, AppState state) {
+    final name = (record.planName ?? record.method).toLowerCase();
+    for (final plan in state.plans ?? const <ShopPlan>[]) {
+      final planName = plan.name.toLowerCase();
+      if (name.contains(planName) || planName.contains(name)) {
+        return plan.availablePeriods;
+      }
+    }
+    return const [];
+  }
+
   Future<void> _openPendingPayment(RechargeRecord record) async {
     final state = context.read<AppState>();
-    final ok = await state.preparePaymentForInvoice(record.id);
-    if (!mounted) return;
-    if (!ok) {
-      if (state.error != null) showAppErrorSnackBar(context, state.error!);
-      return;
-    }
+    final periods = _periodsForRecord(record, state);
     await Navigator.push<void>(
       context,
       MaterialPageRoute<void>(
         builder: (_) => PaymentScreen(
           invoiceId: record.id,
-          planName: record.method,
+          planName: record.planName ?? record.method,
           price: record.amount,
+          periods: periods,
+          periodLabel: record.periodLabel,
         ),
       ),
     );

@@ -6,11 +6,7 @@ void showAppSnackBar(BuildContext context, String message) {
   ScaffoldMessenger.of(context).hideCurrentSnackBar();
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      behavior: SnackBarBehavior.floating,
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
+      behavior: SnackBarBehavior.fixed,
       content: Text(message),
       duration: const Duration(seconds: 3),
     ),
@@ -23,8 +19,7 @@ void showAppErrorSnackBar(BuildContext context, String message) {
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       backgroundColor: AppColors.dangerBg,
-      behavior: SnackBarBehavior.floating,
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      behavior: SnackBarBehavior.fixed,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
         side: const BorderSide(color: AppColors.danger, width: 1),

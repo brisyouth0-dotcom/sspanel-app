@@ -119,13 +119,21 @@ class XboardApi {
     _ensureSuccess(json, fallback: '发送验证码失败');
   }
 
-  Future<void> logout() async {
-    await _http.setAuthData(null);
+  /// 同步清除内存中的登录态（用于立即切换 UI）
+  void signOutLocally() {
     _profile = null;
     _config = null;
     _connected = false;
     _selectedNodeId = null;
     _email = null;
+    _http.clearAuthDataLocally();
+  }
+
+  Future<void> logout() async {
+    signOutLocally();
+    try {
+      await _http.setAuthData(null);
+    } catch (_) {}
   }
 
   Future<void> refreshUser() async {
@@ -585,6 +593,20 @@ class XboardApi {
     );
   }
 
+  String? _periodLabel(String? id) {
+    if (id == null || id.isEmpty) return null;
+    return switch (id) {
+      'month_price' => '月付',
+      'quarter_price' => '季付',
+      'half_year_price' => '半年付',
+      'year_price' => '年付',
+      'two_year_price' => '两年付',
+      'three_year_price' => '三年付',
+      'onetime_price' => '永久',
+      _ => id,
+    };
+  }
+
   List<PlanPeriod> _periodsFromPlanJson(Map<String, dynamic> m) {
     const fields = [
       ('month_price', '月付', null),
@@ -655,10 +677,91 @@ class XboardApi {
 
     return list.map((raw) {
       final m = raw as Map<String, dynamic>;
-      final id = m['id']?.toString() ?? m['payment']?.toString() ?? '';
-      final name = m['name']?.toString() ?? id;
-      return PaymentMethod(id: id, name: name, type: PaymentGatewayType.other);
-    }).toList();
+      final id = m['id']?.toString() ?? '';
+      final payment = m['payment']?.toString() ?? '';
+      final name = m['name']?.toString() ?? payment;
+      if (id.isEmpty) return null;
+      return PaymentMethod(
+        id: id,
+        name: name.isNotEmpty ? name : id,
+        type: _paymentType('$name $payment'),
+      );
+    }).whereType<PaymentMethod>().toList();
+  }
+
+  /// POST /user/order/checkout → 支付链接或二维码内容
+  Future<CheckoutResult> checkoutOrder(String tradeNo, String methodId) async {
+    final method = int.tryParse(methodId);
+    if (method == null) {
+      throw PanelApiException('无效的支付方式');
+    }
+    final response = await _http.post(
+      '/user/order/checkout',
+      data: {'trade_no': tradeNo, 'method': method},
+    );
+    final json = _http.decodeJson(response);
+    _ensureSuccess(json, fallback: '发起支付失败');
+    return _parseCheckoutPayload(json!);
+  }
+
+  CheckoutResult _parseCheckoutPayload(Map<String, dynamic> json) {
+    final nested = json['data'];
+    if (nested is Map<String, dynamic>) {
+      final type = (nested['type'] as num?)?.toInt() ?? 1;
+      final data = _extractCheckoutData(nested);
+      if (data.isEmpty) {
+        throw PanelApiException('支付网关未返回付款信息');
+      }
+      return CheckoutResult(type: type, data: data);
+    }
+    if (nested is String && nested.trim().isNotEmpty) {
+      return CheckoutResult(type: 1, data: nested.trim());
+    }
+    final type = (json['type'] as num?)?.toInt() ?? 1;
+    final data = nested?.toString().trim() ?? '';
+    if (data.isEmpty) {
+      throw PanelApiException('支付网关未返回付款信息');
+    }
+    return CheckoutResult(type: type, data: data);
+  }
+
+  String _extractCheckoutData(Map<String, dynamic> payload) {
+    for (final key in const [
+      'data',
+      'url',
+      'pay_url',
+      'payment_url',
+      'link',
+      'redirect',
+    ]) {
+      final value = payload[key];
+      if (value == null) continue;
+      if (value is String && value.trim().isNotEmpty) {
+        return value.trim();
+      }
+      if (value is Map<String, dynamic>) {
+        final nested = _extractCheckoutData(value);
+        if (nested.isNotEmpty) return nested;
+      }
+    }
+    return '';
+  }
+
+  PaymentGatewayType _paymentType(String label) {
+    final l = label.toLowerCase();
+    if (l.contains('alipay') || l.contains('支付宝')) {
+      return PaymentGatewayType.alipay;
+    }
+    if (l.contains('wx') || l.contains('wechat') || l.contains('微信')) {
+      return PaymentGatewayType.wechat;
+    }
+    if (l.contains('usdt') || l.contains('trc')) {
+      return PaymentGatewayType.usdt;
+    }
+    if (l.contains('stripe') || l.contains('card')) {
+      return PaymentGatewayType.card;
+    }
+    return PaymentGatewayType.other;
   }
 
   String paymentUrl(String gateway, {String? invoiceId}) {
@@ -698,12 +801,19 @@ class XboardApi {
         3 => '已完成',
         _ => '$statusCode',
       };
+      final plan = m['plan'];
+      final planName = plan is Map
+          ? plan['name']?.toString()
+          : m['plan_name']?.toString();
+      final periodId = m['period']?.toString();
       return RechargeRecord(
         id: '${m['trade_no'] ?? m['id']}',
         amount: (m['total_amount'] as num? ?? m['price'] as num? ?? 0) / 100,
-        method: m['payment']?.toString() ?? '订单',
+        method: planName ?? m['payment']?.toString() ?? '订单',
         createdAt: _parseTimestamp(m['created_at']),
         status: status,
+        planName: planName,
+        periodLabel: _periodLabel(periodId),
       );
     }).toList();
   }

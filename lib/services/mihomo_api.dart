@@ -77,31 +77,63 @@ class MihomoApi {
     } catch (_) {}
   }
 
-  /// 通过 mihomo 内核测延迟（与 Clash Verge 一致，走真实代理协议）
-  Future<int?> testProxyDelay(
-    String proxyName, {
-    int timeoutMs = 10000,
-  }) async {
+  /// 读取策略组/代理当前选中的节点名（URLTest 的 now 字段）
+  Future<String?> proxyNow(String proxyName) async {
     try {
       final encoded = Uri.encodeComponent(proxyName);
-      final r = await _dio.get<dynamic>(
-        '/proxies/$encoded/delay',
-        queryParameters: {
-          'url': 'http://www.gstatic.com/generate_204',
-          'timeout': timeoutMs,
-        },
-        options: Options(
-          receiveTimeout: Duration(milliseconds: timeoutMs + 5000),
-          validateStatus: (code) => code != null && code < 600,
-        ),
-      );
+      final r = await _dio.get<dynamic>('/proxies/$encoded');
       if (r.statusCode != 200) return null;
       final data = r.data;
       if (data is Map<String, dynamic>) {
-        final delay = data['delay'];
-        if (delay is num && delay > 0) return delay.round();
+        final now = data['now']?.toString().trim();
+        if (now != null && now.isNotEmpty) return now;
       }
     } catch (_) {}
+    return null;
+  }
+
+  /// URLTest / Selector 组成员列表
+  List<String> proxyGroupMembers(Map<String, dynamic>? groupData) {
+    if (groupData == null) return const [];
+    final all = groupData['all'];
+    if (all is! List) return const [];
+    return all.map((e) => e.toString()).toList();
+  }
+
+  /// 与订阅 url-test 一致用 http；https 在部分节点上会导致测速失败
+  static const delayTestUrls = [
+    'http://www.gstatic.com/generate_204',
+    'http://cp.cloudflare.com/generate_204',
+    'https://www.gstatic.com/generate_204',
+  ];
+
+  /// 通过 mihomo 内核测延迟（与 Clash Verge 一致，走真实代理协议）
+  Future<int?> testProxyDelay(
+    String proxyName, {
+    int timeoutMs = 15000,
+  }) async {
+    final encoded = Uri.encodeComponent(proxyName);
+    for (final url in delayTestUrls) {
+      try {
+        final r = await _dio.get<dynamic>(
+          '/proxies/$encoded/delay',
+          queryParameters: {
+            'url': url,
+            'timeout': timeoutMs,
+          },
+          options: Options(
+            receiveTimeout: Duration(milliseconds: timeoutMs + 8000),
+            validateStatus: (code) => code != null && code < 600,
+          ),
+        );
+        if (r.statusCode != 200) continue;
+        final data = r.data;
+        if (data is Map<String, dynamic>) {
+          final delay = data['delay'];
+          if (delay is num && delay > 0) return delay.round();
+        }
+      } catch (_) {}
+    }
     return null;
   }
 

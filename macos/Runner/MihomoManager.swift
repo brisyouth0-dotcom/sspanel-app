@@ -42,9 +42,41 @@ final class MihomoManager {
     return nil
   }
 
+  /// 清理同配置目录下残留的 mihomo 进程，避免多实例抢占 9090 导致读到空配置
+  private func killOrphanedProcesses(configPath: String) {
+    let workDir = (configPath as NSString).deletingLastPathComponent
+    let selfPid = ProcessInfo.processInfo.processIdentifier
+    // 勿用 "-d path" / "-f path" 作匹配串，macOS pgrep 会把 "-d" 解析成选项
+    terminateProcesses(matching: configPath, excluding: selfPid)
+    terminateProcesses(matching: workDir, excluding: selfPid)
+    Thread.sleep(forTimeInterval: 0.3)
+  }
+
+  private func terminateProcesses(matching pattern: String, excluding skipPid: pid_t) {
+    guard !pattern.isEmpty else { return }
+    let pgrep = Process()
+    pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    pgrep.arguments = ["-f", pattern]
+    let pipe = Pipe()
+    pgrep.standardOutput = pipe
+    do {
+      try pgrep.run()
+      pgrep.waitUntilExit()
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      let text = String(data: data, encoding: .utf8) ?? ""
+      for line in text.components(separatedBy: "\n") {
+        let pid = Int32(line.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        if pid > 1 && pid != skipPid {
+          kill(pid, SIGTERM)
+        }
+      }
+    } catch {}
+  }
+
   @discardableResult
   func start(configPath: String) -> Bool {
     stop()
+    killOrphanedProcesses(configPath: configPath)
     lastStartError = nil
     guard let binary = resolveBinary() else {
       lastStartError = "未找到 mihomo 可执行文件"
@@ -80,8 +112,7 @@ final class MihomoManager {
   }
 
   func stop() {
-    guard let proc = process else { return }
-    if proc.isRunning {
+    if let proc = process, proc.isRunning {
       proc.terminate()
       proc.waitUntilExit()
     }

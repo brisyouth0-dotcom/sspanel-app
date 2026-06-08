@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../models/models.dart';
+import '../utils/proxy_name_match.dart';
 
 class ProxyEndpoint {
   const ProxyEndpoint({
@@ -214,25 +215,17 @@ class NodeSpeedTest {
   }
 
   static ProxyEndpoint? _matchEndpoint(VpnNode node, List<ProxyEndpoint> endpoints) {
-    final name = node.name.trim();
-    final normNode = _norm(name);
-
+    final remarks = endpoints
+        .map((e) => e.remark.trim())
+        .where((r) => r.isNotEmpty)
+        .toList();
+    final matched = matchProxyName(node.name, remarks);
+    if (matched == null) return null;
     for (final ep in endpoints) {
-      final r = ep.remark.trim();
-      if (r.isEmpty) continue;
-      if (r == name || r.contains(name) || name.contains(r)) return ep;
-      final normRemark = _norm(r);
-      if (normRemark == normNode ||
-          normRemark.contains(normNode) ||
-          normNode.contains(normRemark)) {
-        return ep;
-      }
+      if (ep.remark.trim() == matched) return ep;
     }
     return null;
   }
-
-  static String _norm(String s) =>
-      s.replaceAll(RegExp(r'[\s\-_·•]'), '').toLowerCase();
 
   static Future<int?> _tcpPing(String host, int port) async {
     final sw = Stopwatch()..start();

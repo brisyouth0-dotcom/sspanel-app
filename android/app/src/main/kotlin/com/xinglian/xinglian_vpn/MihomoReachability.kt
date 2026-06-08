@@ -22,9 +22,11 @@ object MihomoReachability {
 
     private fun waitForPort(port: Int, maxMs: Int): Boolean {
         val deadline = System.currentTimeMillis() + maxMs
+        var interval = 50L
         while (System.currentTimeMillis() < deadline) {
             if (isPortOpen(port)) return true
-            Thread.sleep(250)
+            Thread.sleep(interval)
+            if (interval < 120) interval += 20
         }
         return isPortOpen(port)
     }

@@ -4,11 +4,23 @@ import 'dart:io';
 import '../config/app_config.dart';
 import '../config/mihomo_paths.dart';
 import '../models/models.dart';
+import '../utils/node_filters.dart';
 import '../utils/proxy_name_match.dart';
 import 'mihomo_api.dart';
 import 'mihomo_bridge.dart';
 import 'panel_exceptions.dart';
 import 'vpn_bridge.dart';
+
+/// 基于面板节点列表测速后的自动选择结果
+class MihomoAutoPickResult {
+  const MihomoAutoPickResult({
+    required this.proxyName,
+    required this.nodeId,
+  });
+
+  final String proxyName;
+  final String nodeId;
+}
 
 /// 管理 mihomo 配置写入、进程生命周期与节点选择
 class MihomoService {
@@ -43,10 +55,13 @@ class MihomoService {
     unawaited(_waitUntilAlive(maxAttempts: 40).catchError((_) {}));
   }
 
-  Future<void> connect({
+  /// 连接并返回自动选择解析出的实际节点名（若有）
+  Future<String?> connect({
     String? clashSubscribeUrl,
     String? clashYaml,
     String? proxyName,
+    List<VpnNode>? panelNodes,
+    Map<String, int>? pingCache,
   }) async {
     if (!isSupported) {
       throw PanelApiException('当前平台不支持内嵌 mihomo');
@@ -66,37 +81,93 @@ class MihomoService {
             androidProfile: androidProfile,
             forVpnTunnel: mobileVpn,
           );
-    if (proxyName != null &&
-        proxyName.isNotEmpty &&
-        (Platform.isAndroid || Platform.isIOS)) {
-      config = _pinSelectedProxyInConfig(config, proxyName);
+    // 手机 VPN 须在启动 TUN 前确定真实叶子节点名（自动选择不能为空）
+    var outboundLabel = mobileVpn
+        ? _resolveOutboundProxyForConnect(
+            config,
+            proxyName,
+            panelNodes,
+            pingCache,
+          )
+        : null;
+    final pinTarget = mobileVpn
+        ? outboundLabel
+        : (proxyName != null &&
+                proxyName.isNotEmpty &&
+                !isAutoSelectGroupName(proxyName)
+            ? proxyName
+            : null);
+    if (pinTarget != null && pinTarget.isNotEmpty && !mobileVpn) {
+      config = _pinSelectedProxyInConfig(config, pinTarget);
     }
     if (mobileVpn) {
+      var label = outboundLabel ?? proxyName;
+      if (label == null || label.isEmpty) {
+        label = _resolveOutboundProxyForConnect(
+          config,
+          null,
+          panelNodes,
+          pingCache,
+        );
+      }
+      if (label == null || label.isEmpty) {
+        throw PanelApiException('请先选择可用节点后再连接');
+      }
       await _startViaVpnService(
         config,
-        nodeLabel: proxyName ?? '—',
-        proxyName: proxyName,
+        nodeLabel: label,
+        proxyName: label,
       );
-    } else {
-      await _restartWithConfig(config);
+      // 手机端由原生 MihomoRouting API 选路，勿改写 YAML（易破坏 proxy-groups 结构）
+      return sanitizeProxyLeaf(label) ?? label;
     }
 
-    if (proxyName != null && proxyName.isNotEmpty) {
+    await _restartWithConfig(config);
+
+    final wantsAutoPick = proxyName == null ||
+        proxyName.isEmpty ||
+        isAutoSelectGroupName(proxyName) ||
+        (clashYaml != null &&
+            resolveAutoSelectGroupFromYaml(clashYaml) == proxyName);
+
+    String? resolvedLeaf;
+    if (wantsAutoPick) {
+      resolvedLeaf = await selectAutoProxy();
+      final data = await _api.proxies();
+      final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+      resolvedLeaf = sanitizeProxyLeaf(resolvedLeaf, proxies: proxies);
+      if (!Platform.isIOS && resolvedLeaf != null) {
+        await _api.setMode('global');
+        await _selectProxyInAllGroups(proxies, resolvedLeaf);
+        try {
+          await _api.closeAllConnections();
+        } catch (_) {}
+      }
+    } else if (proxyName != null && proxyName.isNotEmpty) {
       if (Platform.isAndroid) {
         // 节点已在 StarVpnService 建 TUN 前由原生层选中
       } else if (mobileVpn && !Platform.isIOS) {
         await _api.setMode('global');
         await _applyNodeSelection(proxyName);
       } else if (!Platform.isIOS) {
+        await _api.setMode('global');
         await _applyNodeSelection(proxyName);
       }
     }
+    final endData = await _api.proxies();
+    final endProxies = endData['proxies'] as Map<String, dynamic>? ?? {};
+    return sanitizeProxyLeaf(resolvedLeaf, proxies: endProxies) ??
+        sanitizeProxyLeaf(
+          await resolveActiveLeaf(),
+          proxies: endProxies,
+        );
   }
 
   /// 使用 mihomo 内核对各节点做延迟测试（与 Clash Verge 相同方式）
   Future<Map<String, int>> speedTest({
     required List<VpnNode> nodes,
     required String clashYaml,
+    bool connected = false,
     void Function(String nodeId, int ms)? onProgress,
   }) async {
     if (!isSupported) {
@@ -106,29 +177,39 @@ class MihomoService {
     final vpnActive =
         (Platform.isAndroid || Platform.isIOS) && await VpnBridge.isActive();
 
-    // 已连接 / mihomo 已在跑：直接测延迟，禁止重启（Android 上会打断 VPN 并卡 UI）
-    if (!wasAliveAtStart && !vpnActive) {
+    // 桌面端已连接时 mihomo 正在代理，勿重启否则测速全失败
+    final shouldReloadConfig =
+        !vpnActive && !(connected && wasAliveAtStart);
+    if (shouldReloadConfig) {
       final config = _prepareConfig(clashYaml, forVpnTunnel: false);
       await _restartWithConfig(config, maxAttempts: 60);
     }
 
     final proxyData = await _api.proxies();
     final allProxies = proxyData['proxies'] as Map<String, dynamic>? ?? {};
-    final leafNames = leafProxyNames(allProxies);
+    final leaves = realOutboundProxyNames(allProxies).toSet();
 
     final results = <String, int>{};
     for (final node in nodes) {
       if (node.status == NodeStatus.offline) continue;
-      final proxyName = matchProxyName(node.name, leafNames);
-      if (proxyName == null) continue;
-      final ms = await _api.testProxyDelay(proxyName);
+      final matched = matchProxyName(node.name, leaves);
+      final testNames = <String>{};
+      if (matched != null) testNames.add(matched);
+      if (leaves.contains(node.name)) testNames.add(node.name);
+      if (testNames.isEmpty) continue;
+
+      int? ms;
+      for (final proxy in testNames) {
+        ms = await _api.testProxyDelay(proxy);
+        if (ms != null) break;
+      }
       if (ms != null) {
         results[node.id] = ms;
         onProgress?.call(node.id, ms);
       }
     }
 
-    if (!wasAliveAtStart && !vpnActive) {
+    if (!wasAliveAtStart && !vpnActive && !connected) {
       await MihomoBridge.stop();
       if (!Platform.isAndroid && !Platform.isIOS) {
         await _writeBaseConfig();
@@ -149,18 +230,365 @@ class MihomoService {
       return;
     }
     await MihomoBridge.stop();
-    await _writeBaseConfig();
-    final path = await MihomoPaths.configFile();
-    await MihomoBridge.start(configPath: path);
+  }
+
+  String? _resolveOutboundProxyKey(
+    String label,
+    Map<String, dynamic> proxies,
+  ) {
+    final realLeaves = realOutboundProxyNames(proxies);
+    if (realLeaves.isEmpty) return null;
+    final matched = matchProxyName(label, realLeaves);
+    if (matched != null) return matched;
+    final trimmed = label.trim();
+    if (isRealOutboundProxy(trimmed, proxies)) return trimmed;
+    return null;
   }
 
   Future<void> selectNode(String proxyName) async {
     if (!isSupported) return;
     final data = await _api.proxies();
     final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
-    final leafNames = leafProxyNames(proxies);
-    final resolved = matchProxyName(proxyName, leafNames) ?? proxyName;
+    final resolved = _resolveOutboundProxyKey(proxyName, proxies);
+    if (resolved == null) return;
+    await _api.setMode('global');
+    await _selectProxyInAllGroups(proxies, resolved);
+  }
 
+  List<String> _expandRealLeafMembers(
+    Map<String, dynamic> proxies,
+    List<String> members,
+  ) {
+    final realLeaves = realOutboundProxyNames(proxies).toSet();
+    final out = <String>[];
+    final seen = <String>{};
+
+    void walk(List<String> names) {
+      for (final m in names) {
+        if (seen.contains(m)) continue;
+        seen.add(m);
+        if (isRealOutboundProxy(m, proxies) && realLeaves.contains(m)) {
+          out.add(m);
+          continue;
+        }
+        final item = proxies[m];
+        if (item is Map<String, dynamic> && isProxyGroupEntry(item)) {
+          walk(_api.proxyGroupMembers(item));
+        }
+      }
+    }
+
+    walk(members);
+    return out;
+  }
+
+  List<String> _leafCandidates(Map<String, dynamic> proxies) {
+    final realLeaves = realOutboundProxyNames(proxies).toSet();
+    final group = resolveAutoSelectGroupName(proxies);
+    var candidates = group == null
+        ? <String>[]
+        : _expandRealLeafMembers(
+            proxies,
+            _api.proxyGroupMembers(proxies[group] as Map<String, dynamic>?),
+          );
+    if (candidates.isEmpty) {
+      for (final key in [
+        '灵猫加速器',
+        '🚀 节点选择',
+        '节点选择',
+        'Proxy',
+        'PROXY',
+        'GLOBAL',
+      ]) {
+        final g = proxies[key] as Map<String, dynamic>?;
+        if (g == null) continue;
+        candidates = _expandRealLeafMembers(proxies, _api.proxyGroupMembers(g));
+        if (candidates.isNotEmpty) break;
+      }
+    }
+    if (candidates.isEmpty) {
+      candidates = realLeaves.toList();
+    }
+    return candidates.where(realLeaves.contains).toList();
+  }
+
+  Future<String?> _pickFastestLeaf(List<String> candidates) async {
+    String? best;
+    int? bestMs;
+    for (final leaf in candidates) {
+      final ms = await _api.testProxyDelay(leaf);
+      if (ms != null && (bestMs == null || ms < bestMs)) {
+        bestMs = ms;
+        best = leaf;
+      }
+    }
+    return best;
+  }
+
+  /// 测速挑选有延迟的最快节点；有 URLTest 组则走组，否则从主策略组选
+  Future<String?> selectAutoProxy() async {
+    if (!isSupported) return null;
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final candidates = _leafCandidates(proxies);
+    if (candidates.isEmpty) return null;
+
+    final group = resolveAutoSelectGroupName(proxies);
+    if (group != null) {
+      final best = await _pickFastestLeaf(candidates);
+      if (best != null) {
+        try {
+          await _api.selectProxy(group, best);
+        } catch (_) {}
+        await _selectProxyInAllGroups(proxies, best);
+        return best;
+      }
+      await _api.testProxyDelay(group);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      final now = _matchRealOutboundLeaf(await _api.proxyNow(group), proxies);
+      if (now != null) return now;
+    }
+
+    final best = await _pickFastestLeaf(candidates);
+    if (best != null) {
+      await _selectProxyInAllGroups(proxies, best);
+    }
+    return best;
+  }
+
+  /// 用面板节点列表在已运行的 mihomo 上测速，选最快节点并写入策略组
+  Future<MihomoAutoPickResult?> pickBestFromAppNodes(
+    List<VpnNode> nodes,
+  ) async {
+    if (!isSupported || !await _api.isAlive()) return null;
+    final connectable = filterConnectableNodes(nodes);
+    if (connectable.isEmpty) return null;
+
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final leaves = realOutboundProxyNames(proxies).toSet();
+    if (leaves.isEmpty) return null;
+
+    String? bestProxy;
+    String? bestNodeId;
+    int? bestMs;
+
+    for (final node in connectable) {
+      if (node.status == NodeStatus.offline) continue;
+
+      final matched = matchProxyName(node.name, leaves);
+      final testNames = <String>{};
+      if (matched != null) testNames.add(matched);
+      if (leaves.contains(node.name)) testNames.add(node.name);
+      if (testNames.isEmpty) continue;
+
+      for (final proxy in testNames) {
+        final ms = await _api.testProxyDelay(proxy);
+        if (ms != null && (bestMs == null || ms < bestMs)) {
+          bestMs = ms;
+          bestProxy = proxy;
+          bestNodeId = node.id;
+        }
+        break;
+      }
+    }
+
+    if (bestProxy == null || bestNodeId == null) return null;
+
+    await _api.setMode('global');
+    await _selectProxyInAllGroups(proxies, bestProxy);
+    try {
+      await _api.closeAllConnections();
+    } catch (_) {}
+
+    return MihomoAutoPickResult(proxyName: bestProxy, nodeId: bestNodeId);
+  }
+
+  MihomoAutoPickResult? _pickResultForPanel(
+    List<VpnNode> panelNodes,
+    String leaf,
+  ) {
+    for (final node in filterConnectableNodes(panelNodes)) {
+      if (node.name == leaf || matchProxyName(node.name, [leaf]) != null) {
+        return MihomoAutoPickResult(proxyName: leaf, nodeId: node.id);
+      }
+    }
+    return null;
+  }
+
+  /// 读取当前出站节点（不改动 mihomo 选择）
+  Future<MihomoAutoPickResult?> readOutboundForPanel(
+    List<VpnNode> panelNodes,
+  ) async {
+    if (!isSupported || !await _api.isAlive()) return null;
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final leaf = sanitizeProxyLeaf(
+      await resolveCurrentOutboundLeaf(),
+      proxies: proxies,
+    );
+    if (leaf == null) return null;
+    return _pickResultForPanel(panelNodes, leaf);
+  }
+
+  /// 确保选中真实出站节点（展开 COMPATIBLE 等嵌套策略组）
+  Future<MihomoAutoPickResult?> ensureOutboundForPanel(
+    List<VpnNode> panelNodes,
+  ) async {
+    if (!isSupported || !await _api.isAlive()) return null;
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final realLeaves = realOutboundProxyNames(proxies).toSet();
+    if (realLeaves.isEmpty) return null;
+
+    final current = sanitizeProxyLeaf(
+      await resolveCurrentOutboundLeaf(),
+      proxies: proxies,
+    );
+    if (current != null) {
+      await _api.setMode('global');
+      await _selectProxyInAllGroups(proxies, current);
+      try {
+        await _api.closeAllConnections();
+      } catch (_) {}
+      return _pickResultForPanel(panelNodes, current);
+    }
+
+    final candidates = <String>[];
+    final idByProxy = <String, String>{};
+    for (final node in filterConnectableNodes(panelNodes)) {
+      if (node.status == NodeStatus.offline) continue;
+      final matched = matchProxyName(node.name, realLeaves);
+      if (matched == null) continue;
+      candidates.add(matched);
+      idByProxy[matched] = node.id;
+    }
+    if (candidates.isEmpty) return null;
+
+    var pick = await _pickFastestLeaf(candidates);
+    pick ??= candidates.first;
+
+    await _api.setMode('global');
+    await _selectProxyInAllGroups(proxies, pick);
+    try {
+      await _api.closeAllConnections();
+    } catch (_) {}
+
+    return MihomoAutoPickResult(
+      proxyName: pick,
+      nodeId: idByProxy[pick]!,
+    );
+  }
+
+  String? _matchRealOutboundLeaf(
+    String? name,
+    Map<String, dynamic> proxies,
+  ) {
+    if (name == null || name.isEmpty) return null;
+    final trimmed = name.trim();
+    if (isRealOutboundProxy(trimmed, proxies)) return trimmed;
+    final realLeaves = realOutboundProxyNames(proxies).toSet();
+    final matched = matchProxyName(trimmed, realLeaves);
+    if (matched != null && isRealOutboundProxy(matched, proxies)) return matched;
+    return null;
+  }
+
+  Future<String?> _followProxyChain(
+    String start,
+    Map<String, dynamic> proxies,
+  ) async {
+    var name = start.trim();
+    for (var i = 0; i < 12; i++) {
+      final leaf = _matchRealOutboundLeaf(name, proxies);
+      if (leaf != null) return leaf;
+
+      final item = proxies[name];
+      if (item is! Map<String, dynamic>) break;
+      if (!isProxyGroupEntry(item)) break;
+
+      var now = item['now']?.toString().trim();
+      if (now == null || now.isEmpty) {
+        now = await _api.proxyNow(name);
+      }
+      if (now == null || now.isEmpty) break;
+      name = now;
+    }
+    return _matchRealOutboundLeaf(name, proxies);
+  }
+
+  /// 从主策略组 / GLOBAL 链解析当前实际出站节点（不依赖测速）
+  Future<String?> resolveCurrentOutboundLeaf() async {
+    if (!isSupported || !await _api.isAlive()) return null;
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    if (proxies.isEmpty) return null;
+
+    const preferred = [
+      '灵猫加速器',
+      '🚀 节点选择',
+      '节点选择',
+      'Proxy',
+      'PROXY',
+      'GLOBAL',
+    ];
+    for (final group in preferred) {
+      if (!proxies.containsKey(group)) continue;
+      final leaf = await _followProxyChain(group, proxies);
+      if (leaf != null) return leaf;
+    }
+    return null;
+  }
+
+  /// 从 GLOBAL 策略链解析当前实际出站节点
+  Future<String?> resolveActiveLeaf() => resolveCurrentOutboundLeaf();
+
+  /// 查询当前自动选择组实际使用的节点
+  Future<String?> currentAutoSelectedLeaf() async {
+    if (!isSupported || !await _api.isAlive()) return null;
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final group = resolveAutoSelectGroupName(proxies);
+    if (group == null) return null;
+    final now = await _api.proxyNow(group);
+    return _matchRealOutboundLeaf(now, proxies);
+  }
+
+  /// 载入订阅并执行自动选节点（未连接时用于预览；测完可按需还原 mihomo）
+  Future<String?> runAutoPick({
+    required String clashYaml,
+    bool keepAlive = false,
+  }) async {
+    if (!isSupported) return null;
+    final wasAliveAtStart = await _api.isAlive();
+    final vpnActive =
+        (Platform.isAndroid || Platform.isIOS) && await VpnBridge.isActive();
+
+    if (!vpnActive) {
+      final config = _prepareConfig(clashYaml, forVpnTunnel: false);
+      await _restartWithConfig(config, maxAttempts: 60);
+    }
+
+    String? leaf;
+    try {
+      leaf = await selectAutoProxy();
+    } finally {
+      if (!keepAlive && !wasAliveAtStart && !vpnActive) {
+        await MihomoBridge.stop();
+        if (!Platform.isAndroid && !Platform.isIOS) {
+          await _writeBaseConfig();
+          final path = await MihomoPaths.configFile();
+          await MihomoBridge.start(configPath: path);
+        }
+      }
+    }
+    return leaf;
+  }
+
+  Future<void> _selectProxyInAllGroups(
+    Map<String, dynamic> proxies,
+    String target,
+  ) async {
+    if (!isRealOutboundProxy(target, proxies)) return;
     final selectors = <String>[];
     for (final entry in proxies.entries) {
       final val = entry.value;
@@ -169,14 +597,13 @@ class MihomoService {
       }
     }
 
-    // 必须更新所有 Selector（含规则里的「节点选择」），不能只改 GLOBAL 就返回
     const preferred = [
-      'GLOBAL',
+      '灵猫加速器',
       '🚀 节点选择',
       '节点选择',
       'Proxy',
       'PROXY',
-      '灵猫加速器',
+      'GLOBAL',
     ];
     final ordered = <String>[];
     for (final g in preferred) {
@@ -185,9 +612,32 @@ class MihomoService {
     for (final g in selectors) {
       if (!ordered.contains(g)) ordered.add(g);
     }
+
+    const mainGroups = {'灵猫加速器', '🚀 节点选择', '节点选择', 'Proxy', 'PROXY'};
+    String? mainGroup;
+    for (final g in mainGroups) {
+      if (proxies.containsKey(g)) {
+        mainGroup = g;
+        break;
+      }
+    }
+
     for (final g in ordered) {
       try {
-        await _api.selectProxy(g, resolved);
+        final members = _api.proxyGroupMembers(
+          proxies[g] as Map<String, dynamic>?,
+        );
+        if (g == 'GLOBAL') {
+          if (members.contains(target)) {
+            await _api.selectProxy(g, target);
+          } else if (mainGroup != null && members.contains(mainGroup)) {
+            await _api.selectProxy(g, mainGroup);
+          }
+          continue;
+        }
+        if (members.isEmpty || members.contains(target)) {
+          await _api.selectProxy(g, target);
+        }
       } catch (_) {}
     }
   }
@@ -206,6 +656,9 @@ class MihomoService {
 
   /// 连接后多次确认节点生效，并清理旧连接避免半开状态
   Future<void> _applyNodeSelection(String proxyName) async {
+    if (!Platform.isIOS) {
+      await _api.setMode('global');
+    }
     for (var i = 0; i < 3; i++) {
       await selectNode(proxyName);
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -295,9 +748,13 @@ rules:
   }) async {
     // ignore: avoid_print
     print('[VPN] stopping previous session…');
-    await VpnBridge.stop();
-    await MihomoBridge.stop();
-    await Future<void>.delayed(const Duration(milliseconds: 400));
+    if (await VpnBridge.isActive()) {
+      await VpnBridge.stop();
+    }
+    if (await _api.isAlive()) {
+      await MihomoBridge.stop();
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 120));
     final path = await MihomoPaths.configFile();
     await Directory(await MihomoPaths.workDir()).create(recursive: true);
     await File(path).writeAsString(config);
@@ -316,25 +773,21 @@ rules:
       rethrow;
     }
 
-    final waitSeconds = Platform.isAndroid ? 40 : 25;
+    final waitSeconds = Platform.isAndroid ? 60 : 25;
+    final startedAt = DateTime.now();
     final deadline = DateTime.now().add(Duration(seconds: waitSeconds));
     while (DateTime.now().isBefore(deadline)) {
-      final tunnelUp = await VpnBridge.isActive();
-      final controllerUp = await _api.isAlive();
-      if (Platform.isIOS) {
-        if (tunnelUp) return;
-      } else if (Platform.isAndroid) {
-        if (tunnelUp) {
-          // ignore: avoid_print
-          print('[VPN] tunnel flag active');
-          return;
-        }
-      } else if (tunnelUp && controllerUp) {
-        return;
-      } else if (controllerUp) {
+      if (await VpnBridge.isActive()) {
         return;
       }
-      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (DateTime.now().difference(startedAt) >
+          const Duration(milliseconds: 1500)) {
+        final detail = await MihomoBridge.lastStartError();
+        if (detail != null && detail.isNotEmpty) {
+          throw PanelApiException('VPN 启动失败：$detail');
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 80));
     }
     final detail = await MihomoBridge.lastStartError();
     throw PanelApiException(
@@ -362,6 +815,18 @@ rules:
     await _waitUntilAlive(maxAttempts: maxAttempts);
     if (!await _api.isAlive()) {
       throw PanelApiException('mihomo 启动后无响应，请重试');
+    }
+    await _assertOutboundProxiesLoaded();
+  }
+
+  Future<void> _assertOutboundProxiesLoaded() async {
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final real = realOutboundProxyNames(proxies);
+    if (real.isEmpty) {
+      throw PanelApiException(
+        'mihomo 未加载订阅节点（可能端口被旧进程占用）。请完全退出应用后重试',
+      );
     }
   }
 
@@ -422,44 +887,34 @@ rules:
     bool forVpnTunnel = false,
     AndroidVpnProfile? androidProfile,
   }) {
-    final dnsBlock = forVpnTunnel
-        ? '''
+    if (forVpnTunnel) {
+      return _mergeVpnMinimalBlock(
+        clashYaml,
+        androidProfile: androidProfile,
+      );
+    }
+    // 桌面端替换 DNS、注入 GLOBAL、精简规则
+    final dnsBlock = '''
 dns:
   enable: true
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
+  enhanced-mode: redir-host
   nameserver:
+    - 223.5.5.5
     - 8.8.8.8
-    - 1.1.1.1
   default-nameserver:
     - 223.5.5.5
     - 114.114.114.114
-'''
-        : '''
-dns:
-  enable: true
-  enhanced-mode: fake-ip
-  nameserver:
-    - 223.5.5.5
-    - 8.8.8.8
 ''';
-    // VPN 用 global + GLOBAL 组；节点由 ConfigYamlPinner / 原生路由选定（规则里不能写含 [] 的节点名）
-    final modeLine = forVpnTunnel ? 'global' : 'rule';
-    final tunTuning = forVpnTunnel
-        ? '''
-tcp-concurrent: true
-unified-delay: true
-'''
-        : '';
+    const useGlobalMode = true;
     final header =
         '''
 mixed-port: ${AppConfig.mihomoMixedPort}
 allow-lan: false
-mode: $modeLine
+mode: global
 log-level: info
 external-controller: ${AppConfig.mihomoControllerHost}:${AppConfig.mihomoControllerPort}
 secret: ${AppConfig.mihomoSecret}
-$tunTuning$dnsBlock''';
+$dnsBlock''';
     var body = clashYaml.trimLeft();
     for (final key in [
       'mixed-port:',
@@ -477,7 +932,6 @@ $tunTuning$dnsBlock''';
     ]) {
       body = body.replaceAll(RegExp('^$key.*\n', multiLine: true), '');
     }
-    // 移除订阅里整块 dns / sniffer 配置，避免与后续扩展冲突
     body = body.replaceFirst(
       RegExp(r'^dns:\s*\n(?:[ \t].*\n)*', multiLine: true),
       '',
@@ -486,27 +940,143 @@ $tunTuning$dnsBlock''';
       RegExp(r'^sniffer:\s*\n(?:[ \t].*\n)*', multiLine: true),
       '',
     );
-    if (forVpnTunnel) {
-      body = body.replaceFirst(
-        RegExp(r'^tun:\s*\n(?:[ \t].*\n)*', multiLine: true),
-        '',
-      );
-    }
+    // 订阅已有 GLOBAL；桌面端重复注入会破坏 4 空格 flow 列表（macOS line 23 YAML 错误）
     body = _simplifyRules(
       body,
-      forVpnTunnel: forVpnTunnel,
+      forVpnTunnel: false,
+      useGlobalMode: useGlobalMode,
       androidProfile: androidProfile,
     );
     return '$header\n$body';
+  }
+
+  /// 手机 VPN：hev 负责 TUN；rule + 精简 rules（拦截 DoT）；fake-ip 对齐 mapdns
+  String _mergeVpnMinimalBlock(
+    String clashYaml, {
+    AndroidVpnProfile? androidProfile,
+  }) {
+    final header =
+        '''
+mixed-port: ${AppConfig.mihomoMixedPort}
+allow-lan: false
+mode: rule
+external-controller: ${AppConfig.mihomoControllerHost}:${AppConfig.mihomoControllerPort}
+secret: ${AppConfig.mihomoSecret}
+''';
+    var body = clashYaml.trimLeft();
+    for (final key in [
+      'mixed-port:',
+      'external-controller:',
+      'secret:',
+      'port:',
+      'socks-port:',
+      'allow-lan:',
+      'mode:',
+    ]) {
+      body = body.replaceAll(RegExp('^$key.*\n', multiLine: true), '');
+    }
+    body = body.replaceFirst(
+      RegExp(r'^sniffer:\s*\n(?:[ \t].*\n)*', multiLine: true),
+      '',
+    );
+    body = body.replaceFirst(
+      RegExp(r'^tun:\s*\n(?:[ \t].*\n)*', multiLine: true),
+      '',
+    );
+    body = body.replaceFirst(
+      RegExp(r'^rule-providers:\s*\n(?:[ \t].*\n)*', multiLine: true),
+      '',
+    );
+    body = _configureVpnTunnelStack(body, androidProfile: androidProfile);
+    // 订阅通常已有 GLOBAL；重复注入会与 4 空格 flow 列表混排导致 line 29 YAML 错误
+    body = _simplifyRules(
+      body,
+      forVpnTunnel: true,
+      useGlobalMode: true,
+      androidProfile: androidProfile,
+    );
+    return '$header\n$body';
+  }
+
+  /// hev mapdns 负责 DNS 并经 SOCKS 传域名；鸿蒙额外开 fake-ip 兜底
+  String _configureVpnTunnelStack(
+    String body, {
+    AndroidVpnProfile? androidProfile,
+  }) {
+    body = body.replaceFirst(
+      RegExp(r'^dns:\s*\n(?:[ \t].*\n)*', multiLine: true),
+      '',
+    );
+    body = body.replaceFirst(
+      RegExp(r'^sniffer:\s*\n(?:[ \t].*\n)*', multiLine: true),
+      '',
+    );
+    final harmony = androidProfile?.kind == 'HARMONY';
+    final dnsBlock = harmony
+        ? '''dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 240.0.0.0/4
+  fake-ip-filter:
+    - '+.lan'
+    - '+.local'
+  default-nameserver:
+    - 223.5.5.5
+    - 114.114.114.114
+  nameserver:
+    - 223.5.5.5
+    - 8.8.8.8
+'''
+        : '''dns:
+  enable: false
+''';
+    const snifferBlock = '''sniffer:
+  enable: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+    TLS:
+      ports: [443, 8443]
+''';
+    return '$dnsBlock$snifferBlock$body';
+  }
+
+  /// 注入 GLOBAL 组指向主策略组，global 模式下流量才能进入订阅节点
+  String _ensureGlobalGroup(String body) {
+    var main = _resolveMatchGroup(body);
+    if (main == 'GLOBAL') main = '灵猫加速器';
+    // 移除错误/旧的 GLOBAL 定义（含自引用 proxies: [GLOBAL]）
+    body = body.replaceAll(
+      RegExp(r'^\s*-\s*\{ name: GLOBAL,[^\n]*\}\s*\n', multiLine: true),
+      '',
+    );
+    body = body.replaceAll(
+      RegExp(
+        r'^\s*-\s*name:\s*GLOBAL\s*\n(?:\s+.+\n)*',
+        multiLine: true,
+      ),
+      '',
+    );
+    final pgStart = body.indexOf(RegExp(r'^proxy-groups:\s*$', multiLine: true));
+    if (pgStart < 0) return body;
+    final insertAt = body.indexOf('\n', pgStart);
+    if (insertAt < 0) return body;
+    final needsQuote = RegExp(r'''[\s,\[\]'"]|[^\x00-\x7F]''').hasMatch(main);
+    final mainRef = needsQuote ? "'$main'" : main;
+    final entry =
+        '  - { name: GLOBAL, type: select, proxies: [$mainRef] }\n';
+    return body.substring(0, insertAt + 1) + entry + body.substring(insertAt + 1);
   }
 
   /// 内嵌 mihomo 不下载 GEOIP 库；用精简规则保证秒级启动
   String _simplifyRules(
     String body, {
     bool forVpnTunnel = false,
+    bool useGlobalMode = false,
     AndroidVpnProfile? androidProfile,
   }) {
-    final rulesStart = body.indexOf(RegExp(r'^rules:\s*$', multiLine: true));
+    final rulesStart = body.indexOf(RegExp(r'^rules:', multiLine: true));
     if (rulesStart < 0) return body;
     final matchGroup = _resolveMatchGroup(body);
     final profile = androidProfile ?? AndroidVpnProfile.stock;
@@ -517,16 +1087,11 @@ $tunTuning$dnsBlock''';
         ? '  - AND,((NETWORK,UDP),(DST-PORT,853)),REJECT\n'
             '  - AND,((NETWORK,TCP),(DST-PORT,853)),REJECT\n'
         : '';
-    final minimalRules = forVpnTunnel
-        ? '''
+    final matchTarget = useGlobalMode ? 'GLOBAL' : matchGroup;
+    final minimalRules = '''
 rules:
   - DOMAIN,user.panlink.site,DIRECT
-$quicRule$dotRules  - MATCH,GLOBAL
-'''
-        : '''
-rules:
-  - DOMAIN,user.panlink.site,DIRECT
-  - MATCH,$matchGroup
+$quicRule$dotRules  - MATCH,$matchTarget
 ''';
     return '${body.substring(0, rulesStart).trimRight()}\n$minimalRules';
   }
@@ -555,6 +1120,57 @@ rules:
 
   String? _resolveLeafFromYaml(String yaml, String nodeLabel) {
     return matchProxyName(nodeLabel, _extractLeafNames(yaml));
+  }
+
+  /// 手机 VPN 启动前解析 mihomo 内真实叶子名（含 📶 前缀匹配）
+  String? _resolveOutboundProxyForConnect(
+    String configYaml,
+    String? proxyName,
+    List<VpnNode>? panelNodes,
+    Map<String, int>? pingCache,
+  ) {
+    final leaves = _extractLeafNames(configYaml)
+        .where(isConnectableProxyName)
+        .where((n) => !isReservedOutboundName(n))
+        .toList();
+    if (leaves.isEmpty) return null;
+
+    final wantsAuto = proxyName == null ||
+        proxyName.isEmpty ||
+        isAutoSelectGroupName(proxyName);
+
+    if (!wantsAuto) {
+      return _resolveLeafFromYaml(configYaml, proxyName!) ??
+          matchProxyName(proxyName, leaves);
+    }
+
+    if (panelNodes != null && pingCache != null && pingCache.isNotEmpty) {
+      String? bestLeaf;
+      int? bestMs;
+      for (final node in filterConnectableNodes(panelNodes)) {
+        final ms = pingCache[node.id];
+        if (ms == null || ms <= 0 || ms >= 10000) continue;
+        final leaf = _resolveLeafFromYaml(configYaml, node.name) ??
+            matchProxyName(node.name, leaves);
+        if (leaf == null) continue;
+        if (bestMs == null || ms < bestMs) {
+          bestMs = ms;
+          bestLeaf = leaf;
+        }
+      }
+      if (bestLeaf != null) return bestLeaf;
+    }
+
+    // 自动选择：优先带倍率后缀的节点（通常更稳定）
+    for (final leaf in leaves) {
+      if (RegExp(r'\[x[\d.]+\]', caseSensitive: false).hasMatch(leaf)) {
+        return leaf;
+      }
+    }
+    final real =
+        leaves.where((n) => !isSubscriptionInfoNode(n)).toList();
+    if (real.isNotEmpty) return real.first;
+    return leaves.first;
   }
 
   /// 把选中节点排到各策略组 proxies 列表首位（mihomo 默认选第一个）
@@ -588,21 +1204,29 @@ rules:
         }
         String entryName(String e) =>
             e.trim().substring(2).trim().replaceAll(RegExp(r'''^["']|["']$'''), '');
+        const sinkNames = {
+          'COMPATIBLE',
+          '自动选择',
+          '🚀 自动选择',
+          '♻️ 自动选择',
+          '故障转移',
+          'Auto',
+          'AUTO',
+          'DIRECT',
+          'REJECT',
+          'GLOBAL',
+        };
         final selected =
             entries.where((e) => entryName(e) == resolved).toList();
-        final directReject = entries
-            .where((e) {
-              final n = entryName(e);
-              return n == 'DIRECT' || n == 'REJECT';
-            })
-            .toList();
+        final sunk =
+            entries.where((e) => sinkNames.contains(entryName(e))).toList();
         final rest = entries.where((e) {
           final n = entryName(e);
-          return n != resolved && n != 'DIRECT' && n != 'REJECT';
+          return n != resolved && !sinkNames.contains(n);
         }).toList();
         out.addAll(selected);
         out.addAll(rest);
-        out.addAll(directReject);
+        out.addAll(sunk);
         continue;
       }
       out.add(line);
@@ -622,16 +1246,18 @@ rules:
         .map((m) => m.group(1)!.trim())
         .toList();
     const preferred = [
+      '灵猫加速器',
       '🚀 节点选择',
       '节点选择',
       'Proxy',
       'PROXY',
-      'GLOBAL',
-      '灵猫加速器',
     ];
     for (final p in preferred) {
       if (names.contains(p)) return p;
     }
-    return names.isNotEmpty ? names.first : 'GLOBAL';
+    for (final n in names) {
+      if (n != 'GLOBAL' && n != 'DIRECT' && n != 'REJECT') return n;
+    }
+    return '灵猫加速器';
   }
 }

@@ -25,80 +25,81 @@ class ConnectButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: loading ? null : onTap,
-            customBorder: const CircleBorder(),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 220),
-              curve: Curves.easeOut,
-              width: _size,
-              height: _size,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
+    final label = loading
+        ? connectingLabel
+        : (connected ? disconnectLabel : connectLabel);
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: loading ? null : onTap,
+      child: Column(
+        children: [
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+            width: _size,
+            height: _size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: connected
+                  ? AppColors.primary.withValues(alpha: 0.86)
+                  : AppColors.card.withValues(alpha: 0.68),
+              border: Border.all(
                 color: connected
-                    ? AppColors.primary.withValues(alpha: 0.86)
-                    : AppColors.card.withValues(alpha: 0.68),
-                border: Border.all(
-                  color: connected
-                      ? AppColors.primary.withValues(alpha: 0.9)
-                      : AppColors.border.withValues(alpha: 0.52),
-                  width: connected ? 2.5 : 1,
-                ),
-                boxShadow: connected
-                    ? [
-                        BoxShadow(
-                          color: AppColors.primary.withValues(alpha: 0.45),
-                          blurRadius: 28,
-                          spreadRadius: 2,
-                        ),
-                      ]
-                    : null,
+                    ? AppColors.primary.withValues(alpha: 0.9)
+                    : AppColors.border.withValues(alpha: 0.52),
+                width: connected ? 2.5 : 1,
               ),
-              child: Center(
-                child: loading
-                    ? SizedBox(
-                        width: 32,
-                        height: 32,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.5,
-                          color: connected ? Colors.white : AppColors.primary,
-                        ),
-                      )
-                    : Icon(
-                        Icons.power_settings_new_rounded,
-                        size: 44,
-                        color: connected ? Colors.white : AppColors.textMuted,
+              boxShadow: connected
+                  ? [
+                      BoxShadow(
+                        color: AppColors.primary.withValues(alpha: 0.45),
+                        blurRadius: 28,
+                        spreadRadius: 2,
                       ),
+                    ]
+                  : null,
+            ),
+            child: Center(
+              child: loading
+                  ? SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: connected ? Colors.white : AppColors.primary,
+                      ),
+                    )
+                  : Icon(
+                      Icons.power_settings_new_rounded,
+                      size: 44,
+                      color: connected ? Colors.white : AppColors.textMuted,
+                    ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: connected
+                    ? const Color(0xFF6EE7B7)
+                    : Colors.white.withValues(alpha: 0.88),
+                shadows: const [
+                  Shadow(
+                    color: Color(0xCC000000),
+                    blurRadius: 10,
+                    offset: Offset(0, 1),
+                  ),
+                ],
               ),
             ),
           ),
-        ),
-        const SizedBox(height: 10),
-        Text(
-          loading
-              ? connectingLabel
-              : (connected ? disconnectLabel : connectLabel),
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-            color: connected
-                ? const Color(0xFF14532D)
-                : const Color(0xFF374151),
-            shadows: const [
-              Shadow(color: Color(0xE6FFFFFF), blurRadius: 8),
-              Shadow(
-                color: Color(0x55000000),
-                blurRadius: 4,
-                offset: Offset(0, 1),
-              ),
-            ],
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

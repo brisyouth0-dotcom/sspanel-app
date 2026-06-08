@@ -37,13 +37,13 @@ object HevTunnelManager {
                   mtu: $mtu$ipv6Line
                 socks5:
                   port: $socksPort
-                  address: 127.0.0.1
-                  udp: $udp
+                  address: '${DeviceVpnProfile.MIHOMO_SOCKS_HOST}'
+                  udp: '$udp'
                 mapdns:
-                  address: ${DeviceVpnProfile.VIRTUAL_DNS}
+                  address: ${DeviceVpnProfile.virtualDns}
                   port: 53
-                  network: 198.18.0.0
-                  netmask: 255.255.0.0
+                  network: 240.0.0.0
+                  netmask: 240.0.0.0
                   cache-size: 10000
                 """.trimIndent()
             )

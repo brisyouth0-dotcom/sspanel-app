@@ -124,6 +124,7 @@ class _LoginScreenState extends State<LoginScreen>
                     controller: _emailCtrl,
                     enabled: !loading,
                     keyboardType: TextInputType.emailAddress,
+                    textInputAction: TextInputAction.next,
                     decoration: InputDecoration(
                       hintText: s.emailHint,
                       prefixIcon: const Icon(
@@ -138,6 +139,11 @@ class _LoginScreenState extends State<LoginScreen>
                     controller: _pwdCtrl,
                     enabled: !loading,
                     obscureText: _obscure,
+                    textInputAction:
+                        _needMfa ? TextInputAction.next : TextInputAction.done,
+                    onSubmitted: (_) {
+                      if (!loading && !_needMfa) _login();
+                    },
                     decoration: InputDecoration(
                       hintText: s.passwordHint,
                       prefixIcon: const Icon(
@@ -161,6 +167,10 @@ class _LoginScreenState extends State<LoginScreen>
                       controller: _codeCtrl,
                       enabled: !loading,
                       keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) {
+                        if (!loading) _login();
+                      },
                       decoration: InputDecoration(
                         hintText: s.mfaHint,
                         prefixIcon: const Icon(

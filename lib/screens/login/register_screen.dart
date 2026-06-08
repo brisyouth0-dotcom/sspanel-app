@@ -294,6 +294,7 @@ class _RegisterScreenState extends State<RegisterScreen>
                   enabled: !loading,
                   obscureText: _obscureConfirm,
                   textInputAction: TextInputAction.next,
+                  onSubmitted: (_) => FocusScope.of(context).nextFocus(),
                   decoration: InputDecoration(
                     hintText: s.confirmPasswordHint,
                     prefixIcon: const Icon(
@@ -321,6 +322,9 @@ class _RegisterScreenState extends State<RegisterScreen>
                   controller: _inviteCtrl,
                   enabled: !loading,
                   textInputAction: TextInputAction.done,
+                  onSubmitted: (_) {
+                    if (!loading) _register();
+                  },
                   decoration: InputDecoration(
                     hintText: s.inviteCodeHint,
                     prefixIcon: const Icon(

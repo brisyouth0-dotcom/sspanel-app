@@ -94,7 +94,7 @@ class AppTheme {
       ),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: AppColors.dangerBg,
-        behavior: SnackBarBehavior.floating,
+        behavior: SnackBarBehavior.fixed,
         contentTextStyle: const TextStyle(
           color: Color(0xFFFFB4B4),
           fontSize: 14,

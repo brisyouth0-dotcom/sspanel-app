@@ -19,11 +19,16 @@ import '../services/panel_exceptions.dart';
 import '../services/system_proxy_bridge.dart';
 import '../services/read_state_store.dart';
 import '../services/vpn_bridge.dart';
+import '../utils/node_filters.dart';
+import '../utils/proxy_name_match.dart';
 import '../utils/user_messages.dart';
 
 class AppState extends ChangeNotifier {
   static const _prefUiLangKey = 'ui_lang';
   static const _prefAppDisguiseKey = 'app_disguise';
+
+  /// 菜单栏 / 节点列表「自动选择」占位 ID
+  static const autoSelectNodeId = '__auto_select__';
 
   AppState({ApiService? api, MihomoService? mihomo})
     : _api = api ?? ApiService(),
@@ -48,7 +53,10 @@ class AppState extends ChangeNotifier {
   Map<String, int>? _nodePingMs;
   bool _speedTesting = false;
   bool _connecting = false;
+  bool _ordering = false;
   String? _nodeSearch;
+  String? _autoResolvedLeafName;
+  String? _autoResolvedNodeId;
   int _shellTabIndex = 0;
 
   String? _sessionPassword;
@@ -73,11 +81,14 @@ class AppState extends ChangeNotifier {
   String get nodeSearch => _nodeSearch ?? '';
   bool get loading => _loadingCount > 0;
   bool get connecting => _connecting;
+  bool get ordering => _ordering;
   String get loadingMessage => _loadingMessage ?? '请稍候…';
   String? get error => _error;
   UserProfile? get profile => _api.isLoggedIn ? _api.profile : null;
   bool get isConnected => _api.isConnected;
   String? get selectedNodeId => _api.selectedNodeId;
+  bool get isAutoSelect => _api.selectedNodeId == autoSelectNodeId;
+  String? get autoResolvedLeafName => _autoResolvedLeafName;
   SubscriptionConfig? get config => _api.isLoggedIn ? _api.config : null;
   List<VpnNode>? get nodes => _nodes;
   List<ShopPlan>? get plans => _plans;
@@ -221,11 +232,31 @@ class AppState extends ChangeNotifier {
     _startTrafficMonitor();
     if (systemProxySupported) {
       await setSystemProxy(true);
+      if (!_systemProxyEnabled) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        await setSystemProxy(true);
+      }
     }
     if (mihomoSupported) {
       try {
         _proxyMode = await _mihomo.getMode();
       } catch (_) {}
+    }
+    if (isAutoSelect) {
+      if (_autoResolvedLeafName == null) {
+        final list = filterConnectableNodes(_nodes ?? []);
+        final pick = await _mihomo.ensureOutboundForPanel(list);
+        if (pick != null) {
+          _applyAutoPickResult(pick);
+        } else {
+          await _syncAutoResolvedFromMihomo();
+          if (_autoResolvedLeafName == null) {
+            await _refreshAutoResolvedLeaf();
+          }
+        }
+      } else {
+        await _syncAutoResolvedFromMihomo();
+      }
     }
     await _syncMenuBar();
   }
@@ -249,17 +280,218 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  String? get effectiveSelectedNodeId {
+    if (isAutoSelect) {
+      if (_autoResolvedNodeId != null) return _autoResolvedNodeId;
+      final leaf = sanitizeProxyLeaf(_autoResolvedLeafName);
+      if (leaf == null) return null;
+      return nodeIdByProxyName(leaf);
+    }
+    return _api.selectedNodeId;
+  }
+
+  VpnNode? get effectiveNode {
+    if (isAutoSelect) {
+      if (_autoResolvedNodeId != null) return nodeById(_autoResolvedNodeId);
+      final leaf = sanitizeProxyLeaf(_autoResolvedLeafName);
+      if (leaf != null) return nodeByProxyName(leaf);
+    }
+    return nodeById(_api.selectedNodeId);
+  }
+
+  /// 首页节点条：自动选择时显示实际节点名
+  String connectionDisplayName({String fallback = '选择节点'}) {
+    if (isAutoSelect) {
+      final node = effectiveNode;
+      if (node != null) return node.name;
+      if (_connecting) return '自动选择中…';
+      return fallback;
+    }
+    return nodeById(_api.selectedNodeId)?.name ?? fallback;
+  }
+
+  String selectedNodeLabel({String fallback = '选择节点'}) {
+    if (isAutoSelect) {
+      final node = effectiveNode;
+      if (node != null) return '自动选择 · ${node.name}';
+      if (_connecting) return '自动选择中…';
+      return '自动选择';
+    }
+    return nodeById(_api.selectedNodeId)?.name ?? fallback;
+  }
+
+  String? nodeIdByProxyName(String proxyName) {
+    final node = nodeByProxyName(proxyName);
+    return node?.id;
+  }
+
+  VpnNode? nodeByProxyName(String proxyName) {
+    final list = _nodes;
+    if (list == null || list.isEmpty) return null;
+    final trimmed = proxyName.trim();
+    for (final n in list) {
+      if (n.name == trimmed) return n;
+    }
+    final names = list.map((n) => n.name).toList();
+    final matched = matchProxyName(trimmed, names);
+    if (matched == null) return null;
+    try {
+      return list.firstWhere((n) => n.name == matched);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 未手动选节点时默认走自动选择
+  void ensureAutoSelectIfNeeded() {
+    final id = _api.selectedNodeId;
+    final noSelection = id == null || id.isEmpty;
+    final manualMissing = id != null &&
+        id != autoSelectNodeId &&
+        (_nodes == null || nodeById(id) == null);
+    if (noSelection || manualMissing) {
+      _api.selectNode(autoSelectNodeId);
+      if (manualMissing) {
+        _autoResolvedLeafName = null;
+        _autoResolvedNodeId = null;
+      }
+    }
+  }
+
+  void _applyAutoPickResult(MihomoAutoPickResult? pick) {
+    if (pick == null) return;
+    _autoResolvedNodeId = pick.nodeId;
+    _setAutoResolvedLeaf(pick.proxyName);
+  }
+
+  /// 连接后基于面板节点列表测速选最快节点（比策略组解析更可靠）
+  Future<bool> _autoPickBestNode() async {
+    final list = _nodes;
+    if (list == null || list.isEmpty || !_mihomo.isSupported) return false;
+    if (!await _mihomo.isRunning) return false;
+    try {
+      final pick = await _mihomo.pickBestFromAppNodes(
+        filterConnectableNodes(list),
+      );
+      if (pick == null) return false;
+      _applyAutoPickResult(pick);
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String? _bestLeafFromPingCache() {
+    final pings = _nodePingMs;
+    final list = _nodes;
+    if (pings == null || pings.isEmpty || list == null) return null;
+    String? bestId;
+    int? bestMs;
+    for (final e in pings.entries) {
+      if (bestMs == null || e.value < bestMs) {
+        bestMs = e.value;
+        bestId = e.key;
+      }
+    }
+    return bestId != null ? nodeById(bestId)?.name : null;
+  }
+
+  /// 从 mihomo 当前策略状态同步自动选择结果（不依赖测速）
+  Future<void> _syncAutoResolvedFromMihomo() async {
+    if (!isAutoSelect || !_mihomo.isSupported) return;
+    if (!await _mihomo.isRunning) return;
+    try {
+      final pick = await _mihomo.readOutboundForPanel(
+        filterConnectableNodes(_nodes ?? []),
+      );
+      if (pick != null) {
+        _applyAutoPickResult(pick);
+        return;
+      }
+      final leaf = sanitizeProxyLeaf(_bestLeafFromPingCache());
+      if (leaf == null) return;
+      _autoResolvedLeafName = leaf;
+      _autoResolvedNodeId = nodeIdByProxyName(leaf);
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> _refreshAutoResolvedLeaf({String? clashYaml}) async {
+    if (!isAutoSelect || !_mihomo.isSupported) return;
+    await _syncAutoResolvedFromMihomo();
+    if (_autoResolvedLeafName != null) return;
+    if (await _autoPickBestNode()) return;
+
+    String? leaf;
+    try {
+      if (await _mihomo.isRunning) {
+        leaf = await _mihomo.selectAutoProxy();
+      } else if (clashYaml != null && clashYaml.isNotEmpty) {
+        leaf = await _mihomo.runAutoPick(
+          clashYaml: clashYaml,
+          keepAlive: isConnected,
+        );
+      }
+    } catch (_) {}
+
+    leaf ??= await _mihomo.resolveActiveLeaf();
+    leaf ??= await _mihomo.currentAutoSelectedLeaf();
+    leaf ??= _bestLeafFromPingCache();
+    leaf = sanitizeProxyLeaf(leaf);
+
+    if (leaf != null) {
+      _autoResolvedLeafName = leaf;
+      _autoResolvedNodeId = nodeIdByProxyName(leaf);
+      notifyListeners();
+    }
+  }
+
+  void _setAutoResolvedLeaf(String? leaf) {
+    final clean = sanitizeProxyLeaf(leaf);
+    if (clean != null) {
+      _autoResolvedLeafName = clean;
+      _autoResolvedNodeId = nodeIdByProxyName(clean);
+    }
+  }
+
+  Future<String> _connectionProxyName(String clashYaml) async {
+    final leaves = extractLeafNamesFromYaml(clashYaml);
+    if (isAutoSelect) {
+      // 断开重连时选择框仍显示上次叶子节点，连接须用同一节点而非重新猜策略组
+      final cached =
+          sanitizeProxyLeaf(_autoResolvedLeafName) ?? effectiveNode?.name;
+      if (cached != null && cached.isNotEmpty) {
+        return matchProxyName(cached, leaves) ?? cached;
+      }
+      final group = resolveAutoSelectGroupFromYaml(clashYaml);
+      if (group != null && group.isNotEmpty) return group;
+    } else {
+      final panelName = nodeById(_api.selectedNodeId)?.name ?? '';
+      if (panelName.isNotEmpty) {
+        return matchProxyName(panelName, leaves) ?? panelName;
+      }
+    }
+    for (final leaf in leaves) {
+      if (RegExp(r'\[x[\d.]+\]', caseSensitive: false).hasMatch(leaf)) {
+        return leaf;
+      }
+    }
+    return leaves.isNotEmpty ? leaves.first : '';
+  }
+
   Future<void> _syncMenuBar() async {
-    final node = nodeById(_api.selectedNodeId);
     final menuNodes = (_nodes ?? [])
         .map((n) => {'id': n.id, 'name': n.name})
         .toList();
     await MenuBarBridge.updateMenu(
       connected: isConnected,
-      nodeName: node?.name,
+      nodeName: selectedNodeLabel(),
       mode: _proxyMode,
       nodes: menuNodes,
-      selectedNodeId: _api.selectedNodeId,
+      selectedNodeId:
+          isAutoSelect ? effectiveSelectedNodeId : _api.selectedNodeId,
+      autoSelectActive: isAutoSelect,
     );
   }
 
@@ -333,6 +565,8 @@ class AppState extends ChangeNotifier {
             selectNode(nodeId);
             await _syncMenuBar();
           }
+        case 'selectAuto':
+          await selectAutoNode();
       }
     });
     await loadUiLangPrefs();
@@ -345,25 +579,21 @@ class AppState extends ChangeNotifier {
       // 桌面端后台启动 mihomo，避免阻塞首屏
       unawaited(_mihomo.bootstrap().catchError((_) {}));
     }
-    await runWithLoading('正在连接服务器…', () async {
-      await _api.init();
-      final restored = await _api.tryRestoreSession();
-      if (restored) {
-        _beginLoading('正在恢复数据…');
-        try {
-          await Future.wait([
-            loadPlans(force: true, quiet: true),
-            loadNodes(quiet: true),
-            _loadTelegramUrl(),
-          ]);
-        } finally {
-          _endLoading();
-        }
-      }
-      _initialized = true;
+    await _api.init();
+    final restored = await _api.tryRestoreSession();
+    _initialized = true;
+    notifyListeners();
+    if (restored) {
+      unawaited(
+        Future.wait([
+          loadPlans(force: true, quiet: true),
+          loadNodes(quiet: true),
+          _loadTelegramUrl(),
+        ]).then((_) => _syncMenuBar()),
+      );
+    } else {
       await _syncMenuBar();
-      notifyListeners();
-    });
+    }
   }
 
   void goToShellTab(int index) {
@@ -476,20 +706,25 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void logout() {
+  Future<void> logout() async {
     if (!kIsWeb) {
       unawaited(_onVpnDisconnected());
       _mihomo.disconnect();
       VpnBridge.stop();
       unawaited(_syncMenuBar());
     }
-    _api.logout();
     _sessionPassword = null;
     _nodes = null;
     _plans = null;
     _recharges = null;
     _tickets = null;
     _shellTabIndex = 0;
+    // 先同步清登录态并刷新 UI，避免持久化失败时卡在已登录页
+    _api.signOutLocally();
+    notifyListeners();
+    try {
+      await _api.logout();
+    } catch (_) {}
     notifyListeners();
   }
 
@@ -500,11 +735,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> toggleConnection() async {
-    if (_connecting) {
-      _error = '正在连接，请稍候…';
-      notifyListeners();
-      return;
-    }
+    if (_connecting) return;
     _connecting = true;
     notifyListeners();
     try {
@@ -512,21 +743,52 @@ class AppState extends ChangeNotifier {
       clearError();
       try {
         if (willConnect) {
+          ensureAutoSelectIfNeeded();
           if (_mihomo.isSupported) {
-            if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-              final ok = await VpnBridge.prepare();
+            final mobileVpn =
+                !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+            final nodesFuture = (_nodes == null || _nodes!.isEmpty)
+                ? loadNodes(quiet: true)
+                : Future<void>.value();
+            final subFuture = _api.fetchSubscribeText();
+            final prepareFuture = mobileVpn ? VpnBridge.prepare() : null;
+            await nodesFuture;
+            if (mobileVpn) {
+              final ok = await prepareFuture!;
               if (!ok) {
                 _error = '需要授予 VPN 权限才能连接';
                 notifyListeners();
                 return;
               }
             }
-            final n = nodeById(_api.selectedNodeId);
-            final subText = await _api.fetchSubscribeText();
-            await _mihomo.connect(
+            final subText = await subFuture;
+            final proxyName = await _connectionProxyName(subText);
+            final resolvedLeaf = await _mihomo.connect(
               clashYaml: subText,
-              proxyName: n?.name,
+              proxyName: proxyName.isEmpty ? null : proxyName,
+              panelNodes: _nodes,
+              pingCache: _nodePingMs,
             );
+            if (isAutoSelect) {
+              if (resolvedLeaf != null) {
+                _setAutoResolvedLeaf(resolvedLeaf);
+              } else if (!kIsWeb &&
+                  (Platform.isAndroid || Platform.isIOS)) {
+                // 手机已在 connect 内解析节点，不再重复 API 测速
+              } else {
+                final list = filterConnectableNodes(_nodes ?? []);
+                final pick = await _mihomo.ensureOutboundForPanel(list);
+                if (pick != null) {
+                  _applyAutoPickResult(pick);
+                } else if (!await _autoPickBestNode()) {
+                  _setAutoResolvedLeaf(resolvedLeaf);
+                  if (_autoResolvedLeafName == null) {
+                    await _refreshAutoResolvedLeaf(clashYaml: subText);
+                  }
+                }
+              }
+              notifyListeners();
+            }
           } else if (!kIsWeb) {
             final ok = await VpnBridge.prepare();
             if (!ok) {
@@ -644,6 +906,7 @@ class AppState extends ChangeNotifier {
         results = await _mihomo.speedTest(
           nodes: _nodes!,
           clashYaml: sub,
+          connected: isConnected,
           onProgress: (id, ms) {
             _nodePingMs = {...?_nodePingMs, id: ms};
             notifyListeners();
@@ -689,6 +952,12 @@ class AppState extends ChangeNotifier {
         if ((_nodes == null || _nodes!.isEmpty) && isLoggedIn) {
           _error = '节点接口返回为空，或当前订阅未返回可解析的 Clash 节点';
         }
+        if (_nodes != null && _nodes!.isNotEmpty) {
+          ensureAutoSelectIfNeeded();
+          if (isConnected && isAutoSelect) {
+            await _syncAutoResolvedFromMihomo();
+          }
+        }
       } on PanelApiException catch (e) {
         _error = e.message;
         _nodes = [];
@@ -708,27 +977,93 @@ class AppState extends ChangeNotifier {
   }
 
   void selectNode(String id) {
+    if (id != autoSelectNodeId) {
+      _autoResolvedLeafName = null;
+      _autoResolvedNodeId = null;
+    }
     _api.selectNode(id);
     notifyListeners();
+    unawaited(_applyNodeSelectionToMihomo());
     unawaited(_syncNativeVpnIfConnected());
     unawaited(_syncMenuBar());
   }
 
-  Future<void> _syncNativeVpnIfConnected() async {
-    if (!_api.isConnected) return;
-    final n = nodeById(_api.selectedNodeId);
+  Future<void> selectAutoNode() async {
+    _api.selectNode(autoSelectNodeId);
+    _autoResolvedLeafName = null;
+    _autoResolvedNodeId = null;
+    notifyListeners();
     try {
       if (_mihomo.isSupported) {
-        if (Platform.isIOS && await VpnBridge.isActive()) {
-          final subText = await _api.fetchSubscribeText();
-          await _mihomo.connect(clashYaml: subText, proxyName: n?.name);
+        if (isConnected || await _mihomo.isRunning) {
+          if (!await _autoPickBestNode()) {
+            _setAutoResolvedLeaf(await _mihomo.selectAutoProxy());
+            _autoResolvedNodeId =
+                nodeIdByProxyName(_autoResolvedLeafName ?? '');
+          }
         } else {
-          await _mihomo.confirmNodeSelection(n?.name ?? '');
+          final sub = await _api.fetchSubscribeText();
+          final leaf = await _mihomo.runAutoPick(
+            clashYaml: sub,
+            keepAlive: false,
+          );
+          _setAutoResolvedLeaf(leaf);
+          _autoResolvedNodeId = nodeIdByProxyName(leaf ?? '');
         }
-      } else if (!kIsWeb) {
-        await VpnBridge.start(nodeName: n?.name ?? '—');
       }
     } catch (_) {}
+    notifyListeners();
+    unawaited(_syncNativeVpnIfConnected());
+    await _syncMenuBar();
+  }
+
+  Future<void> _applyNodeSelectionToMihomo() async {
+    if (!_mihomo.isSupported) return;
+    if (!kIsWeb && Platform.isAndroid && _api.isConnected) {
+      return;
+    }
+    try {
+      if (!(await _mihomo.isRunning)) return;
+      if (isAutoSelect) {
+        if (!await _autoPickBestNode()) {
+          _setAutoResolvedLeaf(await _mihomo.selectAutoProxy());
+          _autoResolvedNodeId =
+              nodeIdByProxyName(_autoResolvedLeafName ?? '');
+          notifyListeners();
+        }
+      } else {
+        final n = nodeById(_api.selectedNodeId);
+        if (n != null) await _mihomo.selectNode(n.name);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _syncNativeVpnIfConnected() async {
+    if (!_api.isConnected) return;
+    try {
+      if (_mihomo.isSupported) {
+        final subText = await _api.fetchSubscribeText();
+        final proxyName = await _connectionProxyName(subText);
+        if (proxyName.isEmpty) return;
+        if ((Platform.isIOS || Platform.isAndroid) &&
+            await VpnBridge.isActive()) {
+          await _mihomo.connect(
+            clashYaml: subText,
+            proxyName: proxyName,
+            panelNodes: _nodes,
+            pingCache: _nodePingMs,
+          );
+        } else {
+          await _mihomo.confirmNodeSelection(proxyName);
+        }
+      } else if (!kIsWeb) {
+        final label = selectedNodeLabel(fallback: '—');
+        await VpnBridge.start(nodeName: label);
+      }
+    } catch (e) {
+      _error = UserMessages.networkError(e);
+      notifyListeners();
+    }
   }
 
   VpnNode? nodeById(String? id) {
@@ -767,8 +1102,6 @@ class AppState extends ChangeNotifier {
 
     Future<void> work() async {
       _error = null;
-      _plans = null;
-      notifyListeners();
       try {
         _plans = await _api.fetchPlans();
         if ((_plans == null || _plans!.isEmpty) && isLoggedIn) {
@@ -792,9 +1125,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<bool> preparePaymentForInvoice(String invoiceId) async {
+  Future<bool> preparePaymentForInvoice(
+    String invoiceId, {
+    bool quiet = false,
+  }) async {
     _error = null;
-    _beginLoading('正在获取支付方式…');
+    if (!quiet) {
+      _beginLoading('正在获取支付方式…');
+    }
     try {
       _paymentMethods = await _api.fetchPaymentMethods(invoiceId);
       notifyListeners();
@@ -808,7 +1146,9 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return false;
     } finally {
-      _endLoading();
+      if (!quiet) {
+        _endLoading();
+      }
     }
   }
 
@@ -816,9 +1156,11 @@ class AppState extends ChangeNotifier {
     String planId, {
     String? period,
     String coupon = '',
+    bool quiet = false,
   }) async {
+    if (_ordering) return null;
     _error = null;
-    if (pendingRecharges.isEmpty) {
+    if (_recharges == null) {
       await loadRecharges(quiet: true);
     }
     if (pendingRecharges.isNotEmpty) {
@@ -826,7 +1168,12 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return null;
     }
-    _beginLoading('正在创建订单…');
+    _ordering = true;
+    if (!quiet) {
+      _beginLoading('正在创建订单…');
+    } else {
+      notifyListeners();
+    }
     try {
       ShopPlan? matched;
       for (final p in _plans ?? const <ShopPlan>[]) {
@@ -840,6 +1187,7 @@ class AppState extends ChangeNotifier {
         period: period ?? matched?.orderPeriod ?? 'month_price',
         coupon: coupon,
       );
+      unawaited(loadRecharges(refresh: true, quiet: true));
       return order;
     } on PanelApiException catch (e) {
       _error = e.message;
@@ -850,9 +1198,17 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return null;
     } finally {
-      _endLoading();
+      _ordering = false;
+      if (!quiet) {
+        _endLoading();
+      } else {
+        notifyListeners();
+      }
     }
   }
+
+  Future<CheckoutResult> checkoutOrder(String invoiceId, String methodId) =>
+      _api.checkoutOrder(invoiceId, methodId);
 
   String paymentUrl(String gateway, String invoiceId) =>
       _api.paymentUrl(gateway, invoiceId: invoiceId);
@@ -984,7 +1340,6 @@ class AppState extends ChangeNotifier {
           newPassword: newPassword,
         );
       });
-      logout();
       return true;
     } on PanelApiException catch (e) {
       _error = e.message;

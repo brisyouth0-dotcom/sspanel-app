@@ -43,6 +43,7 @@ class MenuBarBridge {
     required String mode,
     required List<Map<String, String>> nodes,
     String? selectedNodeId,
+    bool autoSelectActive = false,
   }) async {
     if (!supported) return;
     try {
@@ -52,6 +53,7 @@ class MenuBarBridge {
         'mode': mode,
         'nodes': nodes,
         'selectedNodeId': selectedNodeId ?? '',
+        'autoSelectActive': autoSelectActive,
       });
     } on MissingPluginException {
       // macOS target has no registered menu bar bridge.

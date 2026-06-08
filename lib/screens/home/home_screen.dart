@@ -39,9 +39,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final profile = context.select<AppState, UserProfile?>((s) => s.profile);
     if (profile == null) return const SizedBox.shrink();
 
-    final selectedNodeId =
-        context.select<AppState, String?>((s) => s.selectedNodeId);
-    final selected = context.read<AppState>().nodeById(selectedNodeId);
+    final state = context.watch<AppState>();
+    final selected = state.effectiveNode;
     final daysLeft = profile.expireAt?.difference(DateTime.now()).inDays;
     final s = context.read<AppState>().strings;
     final isConnected = context.select<AppState, bool>((s) => s.isConnected);
@@ -102,40 +101,49 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Row(
-                              children: [
-                                Flexible(child: _Tag(profile.planName)),
-                                if (profile.hasActiveSubscription &&
-                                    daysLeft != null) ...[
-                                  const SizedBox(width: 8),
-                                  Flexible(
-                                    child: Text(
-                                      s.daysLeftLine(daysLeft),
-                                      style: AppTheme.bodySecondary,
-                                      overflow: TextOverflow.ellipsis,
-                                      maxLines: 1,
-                                    ),
-                                  ),
-                                ],
-                              ],
+                            Text(
+                              profile.planName,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary,
+                              ),
                             ),
+                            if (profile.hasActiveSubscription &&
+                                daysLeft != null) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                s.daysLeftLine(daysLeft),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.primary,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
-                      OutlinedButton(
+                      FilledButton(
                         onPressed: () {
                           ScaffoldMessenger.of(context).clearSnackBars();
                           context.read<AppState>().goToShellTab(1);
                         },
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textPrimary,
-                          side: const BorderSide(color: AppColors.border),
+                        style: FilledButton.styleFrom(
+                          backgroundColor:
+                              AppColors.badgeOrange.withValues(alpha: 0.16),
+                          foregroundColor: AppColors.badgeOrange,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 10,
+                          ),
                           shape: const StadiumBorder(),
                         ),
                         child: Text(
                           s.upgradePlan,
                           style: const TextStyle(
-                            fontSize: 15,
+                            fontSize: 14,
                             fontWeight: FontWeight.w700,
                           ),
                         ),
@@ -157,14 +165,13 @@ class _HomeScreenState extends State<HomeScreen> {
                             fontSize: 24,
                             fontWeight: FontWeight.w800,
                             color: isConnected
-                                ? const Color(0xFF14532D)
-                                : const Color(0xFF1E293B),
+                                ? const Color(0xFF6EE7B7)
+                                : Colors.white,
                             shadows: const [
-                              Shadow(color: Color(0xE6FFFFFF), blurRadius: 10),
                               Shadow(
-                                color: Color(0x66000000),
-                                blurRadius: 6,
-                                offset: Offset(0, 1),
+                                color: Color(0xCC000000),
+                                blurRadius: 12,
+                                offset: Offset(0, 2),
                               ),
                             ],
                           ),
@@ -242,7 +249,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
                 child: _CurrentNodeBar(
-                  nodeName: selected?.name ?? s.selectServer,
+                  nodeName: state.connectionDisplayName(fallback: s.selectServer),
                   region: selected?.region ?? '--',
                   onTap: () => showNodePickerSheet(context),
                 ),
@@ -322,39 +329,21 @@ class _AnnouncementBell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
-      onPressed: onTap,
-      icon: Badge(
-        isLabelVisible: count > 0,
-        label: Text(count > 9 ? '9+' : '$count'),
-        backgroundColor: AppColors.primary,
-        child: const Icon(
-          Icons.notifications_none,
-          size: 22,
-          color: Color(0xFF1E293B),
+    return Material(
+      color: Colors.black.withValues(alpha: 0.35),
+      shape: const CircleBorder(),
+      child: IconButton(
+        onPressed: onTap,
+        icon: Badge(
+          isLabelVisible: count > 0,
+          label: Text(count > 9 ? '9+' : '$count'),
+          backgroundColor: AppColors.primary,
+          child: const Icon(
+            Icons.notifications_none,
+            size: 22,
+            color: Colors.white,
+          ),
         ),
-      ),
-    );
-  }
-}
-
-class _Tag extends StatelessWidget {
-  const _Tag(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: AppColors.cardElevated,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(fontSize: 12),
-        overflow: TextOverflow.ellipsis,
-        maxLines: 1,
       ),
     );
   }
@@ -401,9 +390,10 @@ class _TrafficPanel extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontWeight: FontWeight.w600,
                     fontSize: 12,
+                    color: Colors.white.withValues(alpha: 0.9),
                   ),
                 ),
                 const Spacer(),
@@ -458,11 +448,18 @@ class _CompactSpeed extends StatelessWidget {
         const SizedBox(width: 3),
         Text(
           '$label ',
-          style: AppTheme.bodySecondary.copyWith(fontSize: 10),
+          style: TextStyle(
+            fontSize: 10,
+            color: Colors.white.withValues(alpha: 0.65),
+          ),
         ),
         Text(
           value,
-          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 11),
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 11,
+            color: Colors.white,
+          ),
         ),
       ],
     );
@@ -486,57 +483,50 @@ class _TrafficQuotaTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final percent = usagePercent.clamp(0, 1).toDouble();
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFFECFDF5).withValues(alpha: 0.62),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: const Color(0xFF34D399).withValues(alpha: 0.28),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.data_usage_rounded,
-                color: Color(0xFF10B981),
-                size: 14,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  '$label · $usageText',
-                  style: AppTheme.bodySecondary.copyWith(fontSize: 10),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Text(
-                value,
-                style: const TextStyle(
-                  color: Color(0xFF064E3B),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(999),
-            child: LinearProgressIndicator(
-              value: percent,
-              minHeight: 4,
-              backgroundColor: Colors.white.withValues(alpha: 0.76),
-              valueColor: const AlwaysStoppedAnimation<Color>(
-                Color(0xFF10B981),
-              ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: LinearProgressIndicator(
+            value: percent,
+            minHeight: 4,
+            backgroundColor: Colors.white.withValues(alpha: 0.18),
+            valueColor: const AlwaysStoppedAnimation<Color>(
+              Color(0xFF34D399),
             ),
           ),
-        ],
-      ),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Icon(
+              Icons.data_usage_rounded,
+              color: Color(0xFF6EE7B7),
+              size: 14,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '$label · $usageText',
+                style: AppTheme.bodySecondary.copyWith(
+                  fontSize: 10,
+                  color: Colors.white.withValues(alpha: 0.72),
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Text(
+              value,
+              style: const TextStyle(
+                color: Color(0xFF6EE7B7),
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

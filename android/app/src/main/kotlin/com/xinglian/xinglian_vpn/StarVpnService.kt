@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 同进程 VPN：mihomo + TUN + hev，保证 hev 能访问本机 127.0.0.1:7890。
+ * 同进程 VPN：mihomo + TUN + hev；hev 经 127.0.0.1 连 mixed-port（本 App 已排除在 TUN 外）。
  */
 class StarVpnService : VpnService() {
 
@@ -230,9 +230,15 @@ class StarVpnService : VpnService() {
             if (profile.useHttpProxy) {
                 // 鸿蒙/国产 ROM 浏览器常走 DoH，用系统 HTTP 代理强制经 mihomo
                 builder.setHttpProxy(
-                    ProxyInfo.buildDirectProxy("127.0.0.1", MIHOMO_SOCKS_PORT),
+                    ProxyInfo.buildDirectProxy(
+                        DeviceVpnProfile.TUN_GATEWAY,
+                        MIHOMO_SOCKS_PORT,
+                    ),
                 )
-                Log.i(TAG, "VPN HTTP proxy → 127.0.0.1:$MIHOMO_SOCKS_PORT")
+                Log.i(
+                    TAG,
+                    "VPN HTTP proxy → ${DeviceVpnProfile.TUN_GATEWAY}:$MIHOMO_SOCKS_PORT",
+                )
             }
         }
         try {
@@ -252,11 +258,12 @@ class StarVpnService : VpnService() {
         } else {
             null
         }
+        val configPinned = ConfigYamlPinner.lastPinSucceeded
 
         if (profile.useMihomoBuiltinTun) {
-            startBuiltinTunTunnel(sessionName, effectiveConfig, proxyLabel)
+            startBuiltinTunTunnel(sessionName, effectiveConfig, proxyLabel, configPinned)
         } else {
-            startHevTunnel(sessionName, effectiveConfig, proxyLabel)
+            startHevTunnel(sessionName, effectiveConfig, proxyLabel, configPinned)
         }
     }
 
@@ -265,6 +272,7 @@ class StarVpnService : VpnService() {
         sessionName: String,
         effectiveConfig: String?,
         proxyLabel: String?,
+        configPinned: Boolean,
     ) {
         establishTunnel(sessionName)
         val tun = tunInterface
@@ -290,7 +298,7 @@ class StarVpnService : VpnService() {
             stopSelf()
             return
         }
-        if (!MihomoReachability.waitForSocks(maxMs = 12000)) {
+        if (!MihomoReachability.waitForSocks(maxMs = 8000)) {
             MihomoManager.stop()
             fail(MihomoManager.lastStartError ?: "mihomo 端口未就绪")
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -298,11 +306,8 @@ class StarVpnService : VpnService() {
             return
         }
         Log.i(TAG, "mihomo ready on 127.0.0.1:$MIHOMO_SOCKS_PORT")
-        if (!MihomoRouting.applyAfterTunnel(proxyLabel)) {
-            Log.w(TAG, "routing incomplete, proxy=$proxyLabel")
-        }
-        val delay = MihomoRouting.measureProxyDelay(proxyLabel, protect = true)
-        if (delay != null) {
+        applyProxyRouting(proxyLabel, afterTunnel = true, configPinned = configPinned)
+        if (MihomoRouting.measureProxyDelay(proxyLabel, protect = true, timeoutMs = 6000) != null) {
             finalizeVpnReady("TUN → mihomo (builtin)", proxyLabel)
             return
         }
@@ -364,6 +369,7 @@ class StarVpnService : VpnService() {
         sessionName: String,
         effectiveConfig: String?,
         proxyLabel: String?,
+        configPinned: Boolean,
     ) {
         if (!effectiveConfig.isNullOrEmpty()) {
             Log.i(TAG, "starting mihomo…")
@@ -375,7 +381,7 @@ class StarVpnService : VpnService() {
                 stopSelf()
                 return
             }
-            if (!MihomoReachability.waitForSocks(maxMs = 12000)) {
+            if (!MihomoReachability.waitForSocks(maxMs = 8000)) {
                 MihomoManager.stop()
                 fail(MihomoManager.lastStartError ?: "mihomo 端口未就绪")
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -383,8 +389,23 @@ class StarVpnService : VpnService() {
                 return
             }
             Log.i(TAG, "mihomo ready on 127.0.0.1:$MIHOMO_SOCKS_PORT")
-            if (!MihomoRouting.applyBeforeTunnel(proxyLabel)) {
-                Log.w(TAG, "routing before tunnel incomplete, proxy=$proxyLabel")
+            applyProxyRouting(
+                proxyLabel,
+                afterTunnel = false,
+                configPinned = configPinned,
+            )
+            val preLabel = proxyLabel?.trim().orEmpty()
+            if (preLabel.isNotEmpty() && preLabel != "—") {
+                val preDelay = MihomoRouting.measureProxyDelay(
+                    proxyLabel,
+                    protect = false,
+                    timeoutMs = 6000,
+                )
+                if (preDelay != null) {
+                    Log.i(TAG, "pre-tunnel delay ok ${preDelay}ms proxy=$preLabel")
+                } else {
+                    Log.w(TAG, "pre-tunnel delay failed proxy=$preLabel")
+                }
             }
         }
 
@@ -412,18 +433,69 @@ class StarVpnService : VpnService() {
             stopSelf()
             return
         }
-        val delay = MihomoRouting.measureProxyDelay(proxyLabel, protect = true)
-        if (delay == null) {
-            fail("节点不可达（延迟测试失败），请更换延迟较低的节点后重试")
-            teardown()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
+        finalizeVpnTunnel(proxyLabel, configPinned)
+    }
+
+    /** pin 只改 YAML 顺序；mihomo 会缓存策略组选中项，重连须 API 强制选路 */
+    private fun applyProxyRouting(
+        proxyLabel: String?,
+        afterTunnel: Boolean,
+        configPinned: Boolean,
+    ): Boolean {
+        val raw = proxyLabel?.trim().orEmpty()
+        val routedLabel =
+            if (raw.isEmpty() || raw == "—") null else proxyLabel
+        val ok = if (afterTunnel) {
+            MihomoRouting.applyAfterTunnel(routedLabel)
+        } else {
+            MihomoRouting.applyBeforeTunnel(routedLabel)
         }
-        finalizeVpnReady(
-            "TUN → hev(${DeviceVpnProfile.hevUdpMode}) → 127.0.0.1:$MIHOMO_SOCKS_PORT",
-            proxyLabel,
-        )
+        val label = raw.ifEmpty { "auto" }
+        when {
+            ok && configPinned ->
+                Log.i(TAG, "routing ok (pinned) proxy=$label afterTunnel=$afterTunnel")
+            ok -> Log.i(TAG, "routing ok proxy=$label afterTunnel=$afterTunnel")
+            else ->
+                Log.w(
+                    TAG,
+                    "routing incomplete proxy=$label pinned=$configPinned afterTunnel=$afterTunnel",
+                )
+        }
+        return ok
+    }
+
+    /** TUN/hev 就绪：protect 下重新选路后立即标记连接成功（测速在后台进行） */
+    private fun finalizeVpnTunnel(proxyLabel: String?, configPinned: Boolean) {
+        applyProxyRouting(proxyLabel, afterTunnel = true, configPinned = configPinned)
+        val label = proxyLabel?.trim().orEmpty()
+        val pathLabel =
+            "TUN → hev(${DeviceVpnProfile.hevUdpMode}) → " +
+                "${DeviceVpnProfile.MIHOMO_SOCKS_HOST}:$MIHOMO_SOCKS_PORT"
+        finalizeVpnReady(pathLabel, proxyLabel)
+        if (label.isNotEmpty() && label != "—") {
+            trafficExecutor.execute {
+                val delay = MihomoRouting.measureProxyDelay(
+                    proxyLabel,
+                    protect = true,
+                    timeoutMs = 8000,
+                )
+                if (delay != null) {
+                    Log.i(TAG, "background delay ok ${delay}ms proxy=$label")
+                } else {
+                    Log.w(TAG, "background delay failed proxy=$label")
+                }
+            }
+        }
+    }
+
+    private fun readHevTrafficBytes(): Long {
+        return try {
+            val stats = hev.sockstun.TProxyService.TProxyGetStats() ?: return 0L
+            if (stats.size < 4) return 0L
+            stats[1] + stats[3]
+        } catch (_: Exception) {
+            0L
+        }
     }
 
     private fun startZeroTrafficWatchdog() {
@@ -437,33 +509,23 @@ class StarVpnService : VpnService() {
                 return@schedule
             }
             if (!HevTunnelManager.running) return@schedule
-            Log.w(TAG, "watchdog: zero traffic after 8s attempt=$hevUdpAttempt")
-            if (hevUdpAttempt == 0) {
-                hevUdpAttempt = 1
-                val alt = if (DeviceVpnProfile.hevUdpMode == "udp") "tcp" else "udp"
-                Log.i(TAG, "watchdog: retry hev udp=$alt")
-                HevTunnelManager.stop()
-                val tun = tunInterface
-                if (tun != null &&
-                    HevTunnelManager.start(
-                        this,
-                        tun.fd,
-                        MIHOMO_SOCKS_PORT,
-                        mtu = DeviceVpnProfile.mtu,
-                        useIpv6 = DeviceVpnProfile.useIpv6Tunnel,
-                        udpMode = alt,
-                    )
-                ) {
-                    MihomoRouting.applyAfterTunnel(lastProxyLabel)
-                    startZeroTrafficWatchdog()
-                    return@schedule
-                }
+            val hevBytes = readHevTrafficBytes()
+            // hev 有流量但 mihomo /traffic 轮询偶发为 0，勿误切 udp→tcp（会破坏 Pixel 浏览器）
+            if (hevBytes > 4096L) {
+                Log.i(
+                    TAG,
+                    "watchdog: hev data plane active hevBytes=$hevBytes (mihomo poll idle)",
+                )
+                return@schedule
             }
-            VpnState.setError(
-                applicationContext,
-                "隧道已建立但无数据流量，请关闭系统「私人DNS」后重试或更换节点",
-            )
-        }, 8, TimeUnit.SECONDS)
+            Log.w(TAG, "watchdog: low traffic hevBytes=$hevBytes")
+            if (hevBytes <= 64L) {
+                VpnState.setError(
+                    applicationContext,
+                    "隧道已建立但无数据流量，请关闭系统「私人DNS」后重试或更换节点",
+                )
+            }
+        }, 12, TimeUnit.SECONDS)
     }
 
     private fun startTrafficPolling() {

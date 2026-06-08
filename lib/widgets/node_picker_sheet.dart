@@ -171,10 +171,23 @@ class _NodePickerSheetState extends State<NodePickerSheet> {
                         : ListView.separated(
                             controller: scrollController,
                             padding: EdgeInsets.fromLTRB(16, 4, 16, bottom + 16),
-                            itemCount: nodes.length + 1,
+                            itemCount: nodes.length + 2,
                             separatorBuilder: (context, index) => const SizedBox(height: 8),
                             itemBuilder: (context, i) {
-                              if (i == nodes.length) {
+                              if (i == 0) {
+                                return _AutoSelectRow(
+                                  selected: state.isAutoSelect,
+                                  activeLeaf: state.isAutoSelect
+                                      ? (state.effectiveNode?.name ??
+                                          state.autoResolvedLeafName)
+                                      : null,
+                                  onTap: () {
+                                    state.selectAutoNode();
+                                    Navigator.pop(context);
+                                  },
+                                );
+                              }
+                              if (i == nodes.length + 1) {
                                 return const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 12),
                                   child: Text(
@@ -184,12 +197,12 @@ class _NodePickerSheetState extends State<NodePickerSheet> {
                                   ),
                                 );
                               }
-                              final node = nodes[i];
+                              final node = nodes[i - 1];
                               final pingMs = state.pingMsForNode(node.id);
                               final pingPending = state.speedTesting && pingMs == null;
                               return _NodeRow(
                                 node: node,
-                                selected: state.selectedNodeId == node.id,
+                                selected: state.effectiveSelectedNodeId == node.id,
                                 pingMs: pingMs,
                                 pingPending: pingPending,
                                 speedTested: state.nodePingMs != null,
@@ -205,6 +218,79 @@ class _NodePickerSheetState extends State<NodePickerSheet> {
           ),
         );
       },
+    );
+  }
+}
+
+class _AutoSelectRow extends StatelessWidget {
+  const _AutoSelectRow({
+    required this.selected,
+    required this.onTap,
+    this.activeLeaf,
+  });
+
+  final bool selected;
+  final VoidCallback onTap;
+  final String? activeLeaf;
+
+  @override
+  Widget build(BuildContext context) {
+    final leaf = activeLeaf?.trim();
+    final hasLeaf = leaf != null && leaf.isNotEmpty && leaf != 'DIRECT';
+
+    return Material(
+      color: selected ? AppColors.primary.withValues(alpha: 0.12) : AppColors.card,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected ? AppColors.primary : AppColors.border,
+            ),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.bolt_rounded, color: AppColors.primary, size: 22),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '自动选择',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    if (selected && hasLeaf) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        leaf!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: AppColors.textSecondary,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (selected && hasLeaf)
+                const Icon(
+                  Icons.check_circle_rounded,
+                  size: 18,
+                  color: AppColors.primary,
+                )
+              else
+                const Icon(Icons.speed, size: 18, color: AppColors.textMuted),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -279,6 +365,15 @@ class _NodeRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
+              if (selected)
+                const Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: Icon(
+                    Icons.check_circle_rounded,
+                    size: 18,
+                    color: AppColors.primary,
+                  ),
+                ),
               if (pingPending)
                 const Padding(
                   padding: EdgeInsets.only(right: 6),

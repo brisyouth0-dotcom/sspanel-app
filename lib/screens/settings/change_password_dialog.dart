@@ -85,8 +85,27 @@ Future<void> showChangePasswordDialog(BuildContext context) async {
                 if (!ctx.mounted) return;
                 if (ok) {
                   Navigator.pop(ctx);
+                  if (!context.mounted) return;
+                  await showDialog<void>(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (hintCtx) => AlertDialog(
+                      backgroundColor: AppColors.surface,
+                      title: Text(s.passwordChanged),
+                      content: Text(s.passwordReloginHint),
+                      actions: [
+                        FilledButton(
+                          onPressed: () => Navigator.pop(hintCtx),
+                          child: Text(s.confirm),
+                        ),
+                      ],
+                    ),
+                  );
                   if (context.mounted) {
-                    showAppSnackBar(context, s.passwordChanged);
+                    await context.read<AppState>().logout();
+                    if (!context.mounted) return;
+                    Navigator.of(context, rootNavigator: true)
+                        .popUntil((route) => route.isFirst);
                   }
                 } else {
                   final err = context.read<AppState>().error;

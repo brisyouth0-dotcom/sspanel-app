@@ -74,6 +74,7 @@ object MihomoManager {
             return false
         }
         val workDir = configFile.parentFile?.absolutePath ?: context.filesDir.absolutePath
+        clearSelectorCache(workDir)
         val inheritedFd = tunFd?.let { prepareInheritedFd(it) }
         val effectiveConfig = if (inheritedFd != null) {
             patchConfigWithTunFd(configFile, inheritedFd)
@@ -82,18 +83,18 @@ object MihomoManager {
         }
         return try {
             val proc = launchProcess(binary, workDir, effectiveConfig)
-            Thread.sleep(500)
+            Thread.sleep(200)
             if (!proc.isAlive) {
                 lastStartError = readProcessOutput(proc).ifEmpty {
                     "mihomo 进程已退出（code ${proc.exitValue()}）"
                 }
                 return false
             }
-            if (!MihomoReachability.waitForSocks(maxMs = 10000)) {
+            if (!MihomoReachability.waitForSocks(maxMs = 30_000)) {
                 lastStartError = readProcessOutput(proc).ifEmpty {
                     "mihomo 端口未就绪，请关闭其他代理应用后重试"
                 }
-                stop()
+                destroyProcess(proc)
                 return false
             }
             process = proc
@@ -136,13 +137,23 @@ object MihomoManager {
     }
 
     fun stop() {
-        process?.let { proc ->
-            try {
-                proc.destroy()
-            } catch (_: Exception) {
-            }
-        }
+        process?.let { destroyProcess(it) }
         process = null
+    }
+
+    private fun destroyProcess(proc: Process) {
+        try {
+            proc.destroy()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 清除策略组选中缓存，避免重连仍走 DIRECT / COMPATIBLE */
+    private fun clearSelectorCache(workDir: String) {
+        try {
+            File(workDir, "cache.db").delete()
+        } catch (_: Exception) {
+        }
     }
 
     fun isAlive(): Boolean = process?.isAlive == true
