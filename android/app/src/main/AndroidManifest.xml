@@ -42,7 +42,7 @@
             android:name=".AliasCalculator"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_calculator"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_calculator"
             android:label="@string/disguise_calculator"
             android:targetActivity=".MainActivity">
@@ -55,7 +55,7 @@
             android:name=".AliasWeather"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_weather"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_weather"
             android:label="@string/disguise_weather"
             android:targetActivity=".MainActivity">
@@ -68,7 +68,7 @@
             android:name=".AliasNotes"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_notes"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_notes"
             android:label="@string/disguise_notes"
             android:targetActivity=".MainActivity">
@@ -81,7 +81,7 @@
             android:name=".AliasSettings"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_settings"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_settings"
             android:label="@string/disguise_settings"
             android:targetActivity=".MainActivity">
@@ -94,7 +94,7 @@
             android:name=".AliasAlbum"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_album"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_album"
             android:label="@string/disguise_album"
             android:targetActivity=".MainActivity">
@@ -107,7 +107,7 @@
             android:name=".AliasGallery"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_gallery"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_gallery"
             android:label="@string/disguise_gallery"
             android:targetActivity=".MainActivity">
@@ -120,7 +120,7 @@
             android:name=".AliasPhone"
             android:enabled="false"
             android:exported="true"
-            android:icon="@mipmap/ic_disguise_phone"
+            android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_disguise_phone"
             android:label="@string/disguise_phone"
             android:targetActivity=".MainActivity">

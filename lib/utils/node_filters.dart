@@ -36,7 +36,7 @@ List<VpnNode> filterConnectableNodes(Iterable<VpnNode> nodes) {
 /// Clash 配置里可连接的代理名（排除流量/到期信息项）
 bool isConnectableProxyName(String name) {
   final n = name.trim();
-  if (n.isEmpty || n == 'DIRECT' || n == 'REJECT') return false;
+  if (n.isEmpty || isBuiltinPolicyProxyName(n)) return false;
   return !isSubscriptionInfoNode(n);
 }
 

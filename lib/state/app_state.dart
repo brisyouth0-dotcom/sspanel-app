@@ -242,20 +242,10 @@ class AppState extends ChangeNotifier {
         _proxyMode = await _mihomo.getMode();
       } catch (_) {}
     }
-    if (isAutoSelect) {
+    if (isAutoSelect && _autoResolvedLeafName == null) {
+      await _syncAutoResolvedFromMihomo();
       if (_autoResolvedLeafName == null) {
-        final list = filterConnectableNodes(_nodes ?? []);
-        final pick = await _mihomo.ensureOutboundForPanel(list);
-        if (pick != null) {
-          _applyAutoPickResult(pick);
-        } else {
-          await _syncAutoResolvedFromMihomo();
-          if (_autoResolvedLeafName == null) {
-            await _refreshAutoResolvedLeaf();
-          }
-        }
-      } else {
-        await _syncAutoResolvedFromMihomo();
+        await _refreshAutoResolvedLeaf();
       }
     }
     await _syncMenuBar();
@@ -304,8 +294,10 @@ class AppState extends ChangeNotifier {
     if (isAutoSelect) {
       final node = effectiveNode;
       if (node != null) return node.name;
+      final leaf = sanitizeProxyLeaf(_autoResolvedLeafName);
+      if (leaf != null && leaf.isNotEmpty) return leaf;
       if (_connecting) return '自动选择中…';
-      return fallback;
+      return '自动选择';
     }
     return nodeById(_api.selectedNodeId)?.name ?? fallback;
   }
@@ -333,7 +325,9 @@ class AppState extends ChangeNotifier {
       if (n.name == trimmed) return n;
     }
     final names = list.map((n) => n.name).toList();
-    final matched = matchProxyName(trimmed, names);
+    final matched =
+        matchProxyName(trimmed, names) ??
+        matchProxyNameRelaxed(trimmed, names);
     if (matched == null) return null;
     try {
       return list.firstWhere((n) => n.name == matched);
@@ -360,8 +354,9 @@ class AppState extends ChangeNotifier {
 
   void _applyAutoPickResult(MihomoAutoPickResult? pick) {
     if (pick == null) return;
-    _autoResolvedNodeId = pick.nodeId;
     _setAutoResolvedLeaf(pick.proxyName);
+    _autoResolvedNodeId =
+        pick.nodeId.isNotEmpty ? pick.nodeId : nodeIdByProxyName(pick.proxyName);
   }
 
   /// 连接后基于面板节点列表测速选最快节点（比策略组解析更可靠）
@@ -372,6 +367,7 @@ class AppState extends ChangeNotifier {
     try {
       final pick = await _mihomo.pickBestFromAppNodes(
         filterConnectableNodes(list),
+        pingCache: _nodePingMs,
       );
       if (pick == null) return false;
       _applyAutoPickResult(pick);
@@ -452,6 +448,11 @@ class AppState extends ChangeNotifier {
     if (clean != null) {
       _autoResolvedLeafName = clean;
       _autoResolvedNodeId = nodeIdByProxyName(clean);
+      return;
+    }
+    if (leaf != null && leaf.trim().isNotEmpty) {
+      _autoResolvedLeafName = null;
+      _autoResolvedNodeId = null;
     }
   }
 
@@ -462,26 +463,28 @@ class AppState extends ChangeNotifier {
       final cached =
           sanitizeProxyLeaf(_autoResolvedLeafName) ?? effectiveNode?.name;
       if (cached != null && cached.isNotEmpty) {
-        return matchProxyName(cached, leaves) ?? cached;
+        return matchProxyName(cached, leaves) ??
+            matchProxyNameRelaxed(cached, leaves) ??
+            cached;
       }
       final group = resolveAutoSelectGroupFromYaml(clashYaml);
       if (group != null && group.isNotEmpty) return group;
     } else {
       final panelName = nodeById(_api.selectedNodeId)?.name ?? '';
       if (panelName.isNotEmpty) {
-        return matchProxyName(panelName, leaves) ?? panelName;
+        return matchProxyName(panelName, leaves) ??
+            matchProxyNameRelaxed(panelName, leaves) ??
+            panelName;
       }
     }
     for (final leaf in leaves) {
-      if (RegExp(r'\[x[\d.]+\]', caseSensitive: false).hasMatch(leaf)) {
-        return leaf;
-      }
+      if (hasProxyTierSuffix(leaf)) return leaf;
     }
     return leaves.isNotEmpty ? leaves.first : '';
   }
 
   Future<void> _syncMenuBar() async {
-    final menuNodes = (_nodes ?? [])
+    final menuNodes = filterConnectableNodes(_nodes ?? [])
         .map((n) => {'id': n.id, 'name': n.name})
         .toList();
     await MenuBarBridge.updateMenu(
@@ -576,8 +579,14 @@ class AppState extends ChangeNotifier {
     }
     if (_mihomo.isSupported &&
         (kIsWeb || (!Platform.isAndroid && !Platform.isIOS))) {
-      // 桌面端后台启动 mihomo，避免阻塞首屏
-      unawaited(_mihomo.bootstrap().catchError((_) {}));
+      if (!kIsWeb && Platform.isWindows) {
+        // 仅 Windows：后台拉起进程，连接时再等待 API 就绪
+        unawaited(_mihomo.warmStart().catchError((_) {}));
+      } else {
+        try {
+          await _mihomo.bootstrap();
+        } catch (_) {}
+      }
     }
     await _api.init();
     final restored = await _api.tryRestoreSession();
@@ -773,19 +782,9 @@ class AppState extends ChangeNotifier {
               if (resolvedLeaf != null) {
                 _setAutoResolvedLeaf(resolvedLeaf);
               } else if (!kIsWeb &&
-                  (Platform.isAndroid || Platform.isIOS)) {
-                // 手机已在 connect 内解析节点，不再重复 API 测速
-              } else {
-                final list = filterConnectableNodes(_nodes ?? []);
-                final pick = await _mihomo.ensureOutboundForPanel(list);
-                if (pick != null) {
-                  _applyAutoPickResult(pick);
-                } else if (!await _autoPickBestNode()) {
-                  _setAutoResolvedLeaf(resolvedLeaf);
-                  if (_autoResolvedLeafName == null) {
-                    await _refreshAutoResolvedLeaf(clashYaml: subText);
-                  }
-                }
+                  !(Platform.isAndroid || Platform.isIOS) &&
+                  !await _autoPickBestNode()) {
+                await _refreshAutoResolvedLeaf(clashYaml: subText);
               }
               notifyListeners();
             }
@@ -807,6 +806,7 @@ class AppState extends ChangeNotifier {
         await _api.toggleConnection();
         if (willConnect) {
           await _onVpnConnected();
+          if (isAutoSelect) await _syncMenuBar();
           clearError();
         } else {
           await _onVpnDisconnected();

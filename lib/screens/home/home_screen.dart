@@ -248,10 +248,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 10),
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-                child: _CurrentNodeBar(
-                  nodeName: state.connectionDisplayName(fallback: s.selectServer),
-                  region: selected?.region ?? '--',
-                  onTap: () => showNodePickerSheet(context),
+                child: Builder(
+                  builder: (context) {
+                    final displayName = state.connectionDisplayName(
+                      fallback: s.selectServer,
+                    );
+                    return _CurrentNodeBar(
+                      nodeName: displayName,
+                      region: selected?.region ?? displayName,
+                      onTap: () => showNodePickerSheet(context),
+                    );
+                  },
                 ),
               ),
             ],

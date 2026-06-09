@@ -6,9 +6,11 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "mihomo_manager.h"
 #include "system_proxy_manager.h"
+#include "tray_manager.h"
 
 namespace {
 
@@ -31,6 +33,34 @@ std::string GetStringArg(const flutter::EncodableMap* map, const char* key) {
   if (it == map->end()) return {};
   if (auto v = std::get_if<std::string>(&it->second)) return *v;
   return {};
+}
+
+bool GetBoolArg(const flutter::EncodableMap* map, const char* key) {
+  if (!map) return false;
+  auto it = map->find(flutter::EncodableValue(key));
+  if (it == map->end()) return false;
+  if (auto v = std::get_if<bool>(&it->second)) return *v;
+  return false;
+}
+
+std::vector<TrayNodeEntry> GetNodesArg(const flutter::EncodableMap* map) {
+  std::vector<TrayNodeEntry> nodes;
+  if (!map) return nodes;
+  auto it = map->find(flutter::EncodableValue("nodes"));
+  if (it == map->end()) return nodes;
+  const auto* list = std::get_if<flutter::EncodableList>(&it->second);
+  if (!list) return nodes;
+  for (const auto& raw : *list) {
+    const auto* entry = std::get_if<flutter::EncodableMap>(&raw);
+    if (!entry) continue;
+    TrayNodeEntry node;
+    node.id = GetStringArg(entry, "id");
+    node.name = GetStringArg(entry, "name");
+    if (!node.id.empty() || !node.name.empty()) {
+      nodes.push_back(std::move(node));
+    }
+  }
+  return nodes;
 }
 
 }  // namespace
@@ -56,6 +86,8 @@ void RegisterPanlinkChannels(flutter::FlutterViewController* controller) {
         } else if (call.method_name() == "stop") {
           MihomoManager::Stop();
           result->Success();
+        } else if (call.method_name() == "isProcessRunning") {
+          result->Success(flutter::EncodableValue(MihomoManager::IsProcessRunning()));
         } else {
           result->NotImplemented();
         }
@@ -90,10 +122,19 @@ void RegisterPanlinkChannels(flutter::FlutterViewController* controller) {
       [](const flutter::MethodCall<flutter::EncodableValue>& call,
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         if (call.method_name() == "updateMenu") {
-          // Windows 托盘 UI 后续扩展；先保证 channel 可用
+          const auto* args =
+              std::get_if<flutter::EncodableMap>(call.arguments());
+          TrayManager::UpdateMenu(
+              GetBoolArg(args, "connected"),
+              GetStringArg(args, "nodeName"),
+              GetStringArg(args, "mode"),
+              GetNodesArg(args),
+              GetStringArg(args, "selectedNodeId"),
+              GetBoolArg(args, "autoSelectActive"));
           result->Success();
         } else {
           result->NotImplemented();
         }
       });
+
 }

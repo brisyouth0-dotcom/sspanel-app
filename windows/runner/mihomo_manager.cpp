@@ -1,9 +1,11 @@
 #include "mihomo_manager.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -12,6 +14,7 @@ namespace fs = std::filesystem;
 void* MihomoManager::process_handle_ = nullptr;
 unsigned long MihomoManager::process_id_ = 0;
 std::string MihomoManager::last_error_;
+std::mutex MihomoManager::mutex_{};
 
 static std::string WideToUtf8(const std::wstring& w) {
   if (w.empty()) return {};
@@ -34,8 +37,11 @@ std::string MihomoManager::ResolveBinary() {
   GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
   fs::path dir = fs::path(exe_path).parent_path();
   const fs::path candidates[] = {
+      dir / L"mihomo-compatible.exe",
       dir / L"mihomo.exe",
+      dir / L"data" / L"mihomo-compatible.exe",
       dir / L"data" / L"mihomo.exe",
+      dir / L".." / L".." / L"Resources" / L"mihomo-compatible.exe",
       dir / L".." / L".." / L"Resources" / L"mihomo.exe",
   };
   for (const auto& c : candidates) {
@@ -45,8 +51,43 @@ std::string MihomoManager::ResolveBinary() {
   return {};
 }
 
+static bool IsMihomoImageName(const wchar_t* image_name) {
+  if (!image_name || image_name[0] == L'\0') return false;
+  std::wstring lower(image_name);
+  for (wchar_t& ch : lower) {
+    ch = static_cast<wchar_t>(towlower(ch));
+  }
+  return lower.find(L"mihomo") != std::wstring::npos;
+}
+
+/// 清理所有 mihomo 相关进程（含 Temp 目录下的 mihomo-windows-amd64-compatible.exe）
+static void KillOrphanedMihomoProcesses(unsigned long skip_pid = 0) {
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+      do {
+        if (!IsMihomoImageName(pe.szExeFile)) continue;
+        const DWORD pid = pe.th32ProcessID;
+        if (pid <= 4 || pid == skip_pid) continue;
+        HANDLE proc =
+            OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+        if (!proc) continue;
+        TerminateProcess(proc, 0);
+        WaitForSingleObject(proc, 2000);
+        CloseHandle(proc);
+      } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+  }
+  Sleep(650);
+}
+
 bool MihomoManager::Start(const std::string& config_path) {
-  Stop();
+  std::lock_guard<std::mutex> lock(mutex_);
+  StopUnlocked();
+  KillOrphanedMihomoProcesses();
   last_error_.clear();
   const std::string binary = ResolveBinary();
   if (binary.empty()) return false;
@@ -71,18 +112,25 @@ bool MihomoManager::Start(const std::string& config_path) {
   process_handle_ = pi.hProcess;
   process_id_ = pi.dwProcessId;
   CloseHandle(pi.hThread);
-  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  const DWORD wait = WaitForSingleObject(pi.hProcess, 800);
   DWORD exit_code = STILL_ACTIVE;
   GetExitCodeProcess(pi.hProcess, &exit_code);
-  if (exit_code != STILL_ACTIVE) {
-    last_error_ = "mihomo 进程已退出（code " + std::to_string(exit_code) + "）";
-    Stop();
+  if (wait == WAIT_OBJECT_0 && exit_code != STILL_ACTIVE) {
+    if (exit_code == 3221225477UL) {
+      last_error_ =
+          "mihomo 进程崩溃（0xC0000005）。请使用 compatible 版本："
+          "scripts/download_mihomo_windows.sh";
+    } else {
+      last_error_ = "mihomo 进程已退出（code " + std::to_string(exit_code) + "）";
+    }
+    StopUnlocked();
     return false;
   }
   return true;
 }
 
-void MihomoManager::Stop() {
+void MihomoManager::StopUnlocked() {
+  const unsigned long tracked = process_id_;
   if (process_handle_) {
     TerminateProcess(static_cast<HANDLE>(process_handle_), 0);
     WaitForSingleObject(static_cast<HANDLE>(process_handle_), 3000);
@@ -90,6 +138,22 @@ void MihomoManager::Stop() {
     process_handle_ = nullptr;
     process_id_ = 0;
   }
+  KillOrphanedMihomoProcesses(tracked);
+}
+
+void MihomoManager::Stop() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  StopUnlocked();
+}
+
+bool MihomoManager::IsProcessRunning() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!process_handle_) return false;
+  DWORD exit_code = STILL_ACTIVE;
+  if (!GetExitCodeProcess(static_cast<HANDLE>(process_handle_), &exit_code)) {
+    return false;
+  }
+  return exit_code == STILL_ACTIVE;
 }
 
 std::string MihomoManager::LastStartError() { return last_error_; }

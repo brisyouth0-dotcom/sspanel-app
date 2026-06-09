@@ -29,17 +29,77 @@ class MihomoService {
   final MihomoApi _api;
 
   bool _bootstrapped = false;
+  Future<void>? _bootstrapFuture;
+  Future<void> _lifecycle = Future<void>.value();
 
   bool get isSupported => MihomoBridge.supported;
 
+  Future<T> _runExclusive<T>(Future<T> Function() action) async {
+    final prior = _lifecycle;
+    final gate = Completer<void>();
+    _lifecycle = gate.future;
+    await prior;
+    try {
+      return await action();
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+    }
+  }
+
+  int get _aliveMaxAttempts => Platform.isWindows ? 160 : 50;
+
+  Duration get _alivePollGap =>
+      Platform.isWindows
+          ? const Duration(milliseconds: 250)
+          : const Duration(milliseconds: 100);
+
+  Future<bool> _probeAlive() =>
+      Platform.isWindows ? _api.isAliveQuick() : _api.isAlive();
+
+  /// 仅 Windows：后台拉起进程，不等待 API（连接时会完整 bootstrap）。
+  Future<void> warmStart() async {
+    if (!isSupported || !Platform.isWindows) return;
+    if (_bootstrapped && await _probeAlive()) return;
+    await _runExclusive(() async {
+      await _writeBaseConfig();
+      final path = await MihomoPaths.configFile();
+      await MihomoBridge.start(configPath: path);
+    });
+  }
+
   Future<void> bootstrap() async {
-    if (!isSupported || _bootstrapped) return;
+    if (!isSupported) return;
     // Android / iOS 在 VPN 连接时由原生层启动 mihomo
     if (Platform.isAndroid || Platform.isIOS) {
       _bootstrapped = true;
       return;
     }
-    _bootstrapped = true;
+    if (_bootstrapped) {
+      if (await _probeAlive()) return;
+      _bootstrapped = false;
+      _bootstrapFuture = null;
+    }
+    // Windows 预热可能是空配置实例；连接时会 _restartWithConfig 载入订阅
+    if (Platform.isWindows && await _waitUntilAlive(quiet: true)) {
+      final data = await _api.proxies();
+      final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+      if (realOutboundProxyNames(proxies).isNotEmpty) {
+        _bootstrapped = true;
+        return;
+      }
+      await MihomoBridge.stop();
+      _bootstrapped = false;
+    }
+    _bootstrapFuture ??= _runExclusive(_doBootstrap);
+    try {
+      await _bootstrapFuture!;
+    } catch (e) {
+      _bootstrapFuture = null;
+      rethrow;
+    }
+  }
+
+  Future<void> _doBootstrap() async {
     await _writeBaseConfig();
     final path = await MihomoPaths.configFile();
     final started = await MihomoBridge.start(configPath: path);
@@ -51,8 +111,10 @@ class MihomoService {
             : 'mihomo 启动失败',
       );
     }
-    // 冷启动不阻塞等待，连接/测速时会自行等待就绪
-    unawaited(_waitUntilAlive(maxAttempts: 40).catchError((_) {}));
+    if (!await _waitUntilAlive()) {
+      throw PanelApiException('mihomo 启动超时，请检查配置与二进制权限');
+    }
+    _bootstrapped = true;
   }
 
   /// 连接并返回自动选择解析出的实际节点名（若有）
@@ -122,7 +184,15 @@ class MihomoService {
       return sanitizeProxyLeaf(label) ?? label;
     }
 
-    await _restartWithConfig(config);
+    if (mobileVpn) {
+      await bootstrap();
+    }
+    await _runExclusive(() async {
+      await _restartWithConfig(
+        config,
+        assertRetries: Platform.isWindows ? 5 : null,
+      );
+    });
 
     final wantsAutoPick = proxyName == null ||
         proxyName.isEmpty ||
@@ -132,16 +202,31 @@ class MihomoService {
 
     String? resolvedLeaf;
     if (wantsAutoPick) {
-      resolvedLeaf = await selectAutoProxy();
-      final data = await _api.proxies();
-      final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
-      resolvedLeaf = sanitizeProxyLeaf(resolvedLeaf, proxies: proxies);
-      if (!Platform.isIOS && resolvedLeaf != null) {
-        await _api.setMode('global');
-        await _selectProxyInAllGroups(proxies, resolvedLeaf);
-        try {
-          await _api.closeAllConnections();
-        } catch (_) {}
+      if (!mobileVpn &&
+          panelNodes != null &&
+          panelNodes.isNotEmpty &&
+          (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+        final pick = await _pickOutboundForConnect(
+          panelNodes,
+          pingCache: pingCache,
+        );
+        resolvedLeaf = pick?.proxyName;
+        if (resolvedLeaf != null) {
+          final data = await _api.proxies();
+          final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+          resolvedLeaf = sanitizeProxyLeaf(resolvedLeaf, proxies: proxies);
+          if (resolvedLeaf != null) {
+            await _applyOutboundPick(proxies, resolvedLeaf);
+          }
+        }
+      }
+      if (!mobileVpn && resolvedLeaf == null) {
+        resolvedLeaf = sanitizeProxyLeaf(await selectAutoProxy());
+        if (resolvedLeaf != null) {
+          final data = await _api.proxies();
+          final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+          await _applyOutboundPick(proxies, resolvedLeaf);
+        }
       }
     } else if (proxyName != null && proxyName.isNotEmpty) {
       if (Platform.isAndroid) {
@@ -182,20 +267,25 @@ class MihomoService {
         !vpnActive && !(connected && wasAliveAtStart);
     if (shouldReloadConfig) {
       final config = _prepareConfig(clashYaml, forVpnTunnel: false);
-      await _restartWithConfig(config, maxAttempts: 60);
+      await bootstrap();
+      await _runExclusive(
+        () => _restartWithConfig(config, maxAttempts: 60),
+      );
     }
 
     final proxyData = await _api.proxies();
     final allProxies = proxyData['proxies'] as Map<String, dynamic>? ?? {};
     final leaves = realOutboundProxyNames(allProxies).toSet();
+    final autoGroup = resolveAutoSelectGroupName(allProxies);
+    if (autoGroup != null) {
+      await _api.testProxyDelay(autoGroup);
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+    }
 
     final results = <String, int>{};
     for (final node in nodes) {
       if (node.status == NodeStatus.offline) continue;
-      final matched = matchProxyName(node.name, leaves);
-      final testNames = <String>{};
-      if (matched != null) testNames.add(matched);
-      if (leaves.contains(node.name)) testNames.add(node.name);
+      final testNames = proxyNamesForPanelNode(node.name, leaves);
       if (testNames.isEmpty) continue;
 
       int? ms;
@@ -206,6 +296,14 @@ class MihomoService {
       if (ms != null) {
         results[node.id] = ms;
         onProgress?.call(node.id, ms);
+        for (final other in nodes) {
+          if (other.id == node.id || results.containsKey(other.id)) continue;
+          final otherNames = proxyNamesForPanelNode(other.name, leaves);
+          if (otherNames.any(testNames.contains)) {
+            results[other.id] = ms;
+            onProgress?.call(other.id, ms);
+          }
+        }
       }
     }
 
@@ -229,7 +327,7 @@ class MihomoService {
       await VpnBridge.stop();
       return;
     }
-    await MihomoBridge.stop();
+    await _runExclusive(MihomoBridge.stop);
   }
 
   String? _resolveOutboundProxyKey(
@@ -238,7 +336,9 @@ class MihomoService {
   ) {
     final realLeaves = realOutboundProxyNames(proxies);
     if (realLeaves.isEmpty) return null;
-    final matched = matchProxyName(label, realLeaves);
+    final matched =
+        matchProxyName(label, realLeaves) ??
+        matchProxyNameRelaxed(label, realLeaves);
     if (matched != null) return matched;
     final trimmed = label.trim();
     if (isRealOutboundProxy(trimmed, proxies)) return trimmed;
@@ -282,6 +382,61 @@ class MihomoService {
     return out;
   }
 
+  bool _isValidPingMs(int? ms) => ms != null && ms > 0 && ms < 10000;
+
+  int _leafPreferenceScore(String name) {
+    var score = 0;
+    if (hasProxyTierSuffix(name)) score += 20;
+    return score;
+  }
+
+  int _panelNodeMatchScore(String nodeName, String leaf) {
+    if (nodeName == leaf) return 10000;
+    if (matchProxyName(nodeName, [leaf]) != null) return 9500;
+    if (matchProxyName(leaf, [nodeName]) != null) return 9400;
+    if (matchProxyNameRelaxed(nodeName, [leaf]) != null) return 5000;
+    if (matchProxyNameRelaxed(leaf, [nodeName]) != null) return 4900;
+    return -1;
+  }
+
+  MihomoAutoPickResult? _pickBestFromPingCache(
+    List<VpnNode> panelNodes,
+    Map<String, int> pingCache,
+    Set<String> realLeaves,
+  ) {
+    String? bestProxy;
+    String? bestNodeId;
+    int? bestMs;
+    for (final node in filterConnectableNodes(panelNodes)) {
+      if (node.status == NodeStatus.offline) continue;
+      final ms = pingCache[node.id];
+      if (!_isValidPingMs(ms)) continue;
+      final names = _sortLeavesByPreference(
+        proxyNamesForPanelNode(node.name, realLeaves),
+      );
+      if (names.isEmpty) continue;
+      if (bestMs == null || ms! < bestMs) {
+        bestMs = ms;
+        bestProxy = names.first;
+        bestNodeId = node.id;
+      }
+    }
+    if (bestProxy == null || bestNodeId == null) return null;
+    return MihomoAutoPickResult(proxyName: bestProxy, nodeId: bestNodeId);
+  }
+
+  List<String> _sortLeavesByPreference(Iterable<String> leaves) {
+    final list = leaves.toList();
+    list.sort((a, b) => _leafPreferenceScore(b).compareTo(_leafPreferenceScore(a)));
+    return list;
+  }
+
+  String? _pickFirstRealLeaf(Map<String, dynamic> proxies) {
+    final leaves = _sortLeavesByPreference(realOutboundProxyNames(proxies));
+    if (leaves.isEmpty) return null;
+    return leaves.first;
+  }
+
   List<String> _leafCandidates(Map<String, dynamic> proxies) {
     final realLeaves = realOutboundProxyNames(proxies).toSet();
     final group = resolveAutoSelectGroupName(proxies);
@@ -309,20 +464,115 @@ class MihomoService {
     if (candidates.isEmpty) {
       candidates = realLeaves.toList();
     }
-    return candidates.where(realLeaves.contains).toList();
+    return _sortLeavesByPreference(
+      candidates.where(realLeaves.contains),
+    );
   }
 
-  Future<String?> _pickFastestLeaf(List<String> candidates) async {
+  Future<String?> _pickFastestLeaf(
+    List<String> candidates, {
+    int? timeoutMs,
+  }) async {
     String? best;
     int? bestMs;
     for (final leaf in candidates) {
-      final ms = await _api.testProxyDelay(leaf);
+      final ms = await _api.testProxyDelay(leaf, timeoutMs: timeoutMs);
       if (ms != null && (bestMs == null || ms < bestMs)) {
         bestMs = ms;
         best = leaf;
       }
     }
     return best;
+  }
+
+  /// 连接时并行探测前几个候选，避免串行测速拖慢连接
+  Future<String?> _pickFastestLeafParallel(
+    List<String> candidates, {
+    int maxProbe = 3,
+    int? timeoutMs,
+  }) async {
+    if (candidates.isEmpty) return null;
+    final probe = candidates.take(maxProbe).toList();
+    final results = await Future.wait(
+      probe.map((leaf) async {
+        final ms = await _api.testProxyDelay(leaf, timeoutMs: timeoutMs);
+        return (leaf: leaf, ms: ms);
+      }),
+    );
+    String? best;
+    int? bestMs;
+    for (final r in results) {
+      if (r.ms != null && (bestMs == null || r.ms! < bestMs)) {
+        bestMs = r.ms;
+        best = r.leaf;
+      }
+    }
+    return best;
+  }
+
+  List<String> _collectPanelOutboundCandidates(
+    List<VpnNode> panelNodes,
+    Set<String> realLeaves,
+    Map<String, dynamic> proxies,
+  ) {
+    final candidates = <String>[];
+    for (final node in filterConnectableNodes(panelNodes)) {
+      if (node.status == NodeStatus.offline) continue;
+      for (final matched in proxyNamesForPanelNode(node.name, realLeaves)) {
+        if (!candidates.contains(matched)) candidates.add(matched);
+      }
+    }
+    if (candidates.isEmpty) {
+      candidates.addAll(_leafCandidates(proxies));
+    }
+    return _sortLeavesByPreference(candidates);
+  }
+
+  /// 连接专用：优先测速缓存，否则并行短超时探测，避免重复选路
+  Future<MihomoAutoPickResult?> _pickOutboundForConnect(
+    List<VpnNode> panelNodes, {
+    Map<String, int>? pingCache,
+  }) async {
+    if (!await _api.isAlive()) return null;
+    final data = await _api.proxies();
+    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+    final realLeaves = realOutboundProxyNames(proxies).toSet();
+    if (realLeaves.isEmpty) return null;
+
+    if (pingCache != null && pingCache.isNotEmpty) {
+      final cached = _pickBestFromPingCache(panelNodes, pingCache, realLeaves);
+      if (cached != null) return cached;
+    }
+
+    final sorted = _collectPanelOutboundCandidates(
+      panelNodes,
+      realLeaves,
+      proxies,
+    );
+    if (sorted.isEmpty) return null;
+
+    final timeoutMs = Platform.isWindows ? 8000 : 12000;
+    final maxProbe = Platform.isWindows ? 3 : 5;
+    final pick = await _pickFastestLeafParallel(
+      sorted,
+      maxProbe: maxProbe,
+      timeoutMs: timeoutMs,
+    );
+    if (pick == null) return null;
+    return _pickResultForPanel(panelNodes, pick) ??
+        MihomoAutoPickResult(proxyName: pick, nodeId: '');
+  }
+
+  Future<void> _applyOutboundPick(
+    Map<String, dynamic> proxies,
+    String leaf,
+  ) async {
+    if (Platform.isIOS) return;
+    await _api.setMode('global');
+    await _selectProxyInAllGroups(proxies, leaf);
+    try {
+      await _api.closeAllConnections();
+    } catch (_) {}
   }
 
   /// 测速挑选有延迟的最快节点；有 URLTest 组则走组，否则从主策略组选
@@ -344,9 +594,15 @@ class MihomoService {
         return best;
       }
       await _api.testProxyDelay(group);
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await Future<void>.delayed(const Duration(milliseconds: 500));
       final now = _matchRealOutboundLeaf(await _api.proxyNow(group), proxies);
-      if (now != null) return now;
+      if (now != null) {
+        final nowMs = await _api.testProxyDelay(now);
+        if (nowMs != null) {
+          await _selectProxyInAllGroups(proxies, now);
+          return now;
+        }
+      }
     }
 
     final best = await _pickFastestLeaf(candidates);
@@ -358,8 +614,9 @@ class MihomoService {
 
   /// 用面板节点列表在已运行的 mihomo 上测速，选最快节点并写入策略组
   Future<MihomoAutoPickResult?> pickBestFromAppNodes(
-    List<VpnNode> nodes,
-  ) async {
+    List<VpnNode> nodes, {
+    Map<String, int>? pingCache,
+  }) async {
     if (!isSupported || !await _api.isAlive()) return null;
     final connectable = filterConnectableNodes(nodes);
     if (connectable.isEmpty) return null;
@@ -369,6 +626,18 @@ class MihomoService {
     final leaves = realOutboundProxyNames(proxies).toSet();
     if (leaves.isEmpty) return null;
 
+    if (pingCache != null && pingCache.isNotEmpty) {
+      final cached = _pickBestFromPingCache(connectable, pingCache, leaves);
+      if (cached != null) {
+        await _api.setMode('global');
+        await _selectProxyInAllGroups(proxies, cached.proxyName);
+        try {
+          await _api.closeAllConnections();
+        } catch (_) {}
+        return cached;
+      }
+    }
+
     String? bestProxy;
     String? bestNodeId;
     int? bestMs;
@@ -376,10 +645,7 @@ class MihomoService {
     for (final node in connectable) {
       if (node.status == NodeStatus.offline) continue;
 
-      final matched = matchProxyName(node.name, leaves);
-      final testNames = <String>{};
-      if (matched != null) testNames.add(matched);
-      if (leaves.contains(node.name)) testNames.add(node.name);
+      final testNames = proxyNamesForPanelNode(node.name, leaves);
       if (testNames.isEmpty) continue;
 
       for (final proxy in testNames) {
@@ -389,7 +655,6 @@ class MihomoService {
           bestProxy = proxy;
           bestNodeId = node.id;
         }
-        break;
       }
     }
 
@@ -408,12 +673,16 @@ class MihomoService {
     List<VpnNode> panelNodes,
     String leaf,
   ) {
+    MihomoAutoPickResult? best;
+    var bestScore = -1;
     for (final node in filterConnectableNodes(panelNodes)) {
-      if (node.name == leaf || matchProxyName(node.name, [leaf]) != null) {
-        return MihomoAutoPickResult(proxyName: leaf, nodeId: node.id);
+      final score = _panelNodeMatchScore(node.name, leaf);
+      if (score > bestScore) {
+        bestScore = score;
+        best = MihomoAutoPickResult(proxyName: leaf, nodeId: node.id);
       }
     }
-    return null;
+    return best;
   }
 
   /// 读取当前出站节点（不改动 mihomo 选择）
@@ -433,8 +702,9 @@ class MihomoService {
 
   /// 确保选中真实出站节点（展开 COMPATIBLE 等嵌套策略组）
   Future<MihomoAutoPickResult?> ensureOutboundForPanel(
-    List<VpnNode> panelNodes,
-  ) async {
+    List<VpnNode> panelNodes, {
+    Map<String, int>? pingCache,
+  }) async {
     if (!isSupported || !await _api.isAlive()) return null;
     final data = await _api.proxies();
     final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
@@ -445,28 +715,54 @@ class MihomoService {
       await resolveCurrentOutboundLeaf(),
       proxies: proxies,
     );
-    if (current != null) {
-      await _api.setMode('global');
-      await _selectProxyInAllGroups(proxies, current);
-      try {
-        await _api.closeAllConnections();
-      } catch (_) {}
-      return _pickResultForPanel(panelNodes, current);
+    if (current != null && isRealOutboundProxy(current, proxies)) {
+      final currentResult = _pickResultForPanel(panelNodes, current);
+      int? cachedMs;
+      if (currentResult != null && pingCache != null) {
+        cachedMs = pingCache[currentResult.nodeId];
+      }
+      var keepCurrent = _isValidPingMs(cachedMs);
+      if (!keepCurrent) {
+        keepCurrent = await _api.testProxyDelay(current) != null;
+      }
+      if (keepCurrent) {
+        await _api.setMode('global');
+        await _selectProxyInAllGroups(proxies, current);
+        try {
+          await _api.closeAllConnections();
+        } catch (_) {}
+        return currentResult ??
+            MihomoAutoPickResult(proxyName: current, nodeId: '');
+      }
     }
 
     final candidates = <String>[];
     final idByProxy = <String, String>{};
     for (final node in filterConnectableNodes(panelNodes)) {
       if (node.status == NodeStatus.offline) continue;
-      final matched = matchProxyName(node.name, realLeaves);
-      if (matched == null) continue;
-      candidates.add(matched);
-      idByProxy[matched] = node.id;
+      for (final matched in proxyNamesForPanelNode(node.name, realLeaves)) {
+        if (candidates.contains(matched)) continue;
+        candidates.add(matched);
+        idByProxy[matched] = node.id;
+      }
+    }
+    if (candidates.isEmpty) {
+      for (final leaf in _leafCandidates(proxies)) {
+        candidates.add(leaf);
+        final panelMatch = _pickResultForPanel(panelNodes, leaf);
+        idByProxy[leaf] = panelMatch?.nodeId ?? '';
+      }
     }
     if (candidates.isEmpty) return null;
 
-    var pick = await _pickFastestLeaf(candidates);
-    pick ??= candidates.first;
+    final sortedCandidates = _sortLeavesByPreference(candidates);
+    var pickResult = pingCache != null && pingCache.isNotEmpty
+        ? _pickBestFromPingCache(panelNodes, pingCache, realLeaves)
+        : null;
+    var pick = pickResult?.proxyName;
+    pick ??= await _pickFastestLeaf(sortedCandidates);
+    if (pick == null) return null;
+    pickResult ??= _pickResultForPanel(panelNodes, pick);
 
     await _api.setMode('global');
     await _selectProxyInAllGroups(proxies, pick);
@@ -474,10 +770,12 @@ class MihomoService {
       await _api.closeAllConnections();
     } catch (_) {}
 
-    return MihomoAutoPickResult(
-      proxyName: pick,
-      nodeId: idByProxy[pick]!,
-    );
+    final nodeId = pickResult != null && pickResult.nodeId.isNotEmpty
+        ? pickResult.nodeId
+        : (idByProxy[pick]?.isNotEmpty == true
+            ? idByProxy[pick]!
+            : (_pickResultForPanel(panelNodes, pick)?.nodeId ?? ''));
+    return MihomoAutoPickResult(proxyName: pick, nodeId: nodeId);
   }
 
   String? _matchRealOutboundLeaf(
@@ -589,6 +887,7 @@ class MihomoService {
     String target,
   ) async {
     if (!isRealOutboundProxy(target, proxies)) return;
+    if (isBuiltinPolicyProxyName(target)) return;
     final selectors = <String>[];
     for (final entry in proxies.entries) {
       final val = entry.value;
@@ -659,9 +958,12 @@ class MihomoService {
     if (!Platform.isIOS) {
       await _api.setMode('global');
     }
-    for (var i = 0; i < 3; i++) {
+    final passes = Platform.isWindows ? 1 : 3;
+    for (var i = 0; i < passes; i++) {
       await selectNode(proxyName);
-      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (i < passes - 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
     }
     try {
       await _api.closeAllConnections();
@@ -674,11 +976,26 @@ class MihomoService {
 
   Future<void> setMode(String mode) => _api.setMode(mode);
 
-  Future<void> _waitUntilAlive({int maxAttempts = 50}) async {
-    for (var i = 0; i < maxAttempts; i++) {
-      if (await _api.isAlive()) return;
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+  /// [quiet] 为 true 时不抛错，仅返回是否就绪（Windows 预热探测用）。
+  Future<bool> _waitUntilAlive({int? maxAttempts, bool quiet = false}) async {
+    final attempts = maxAttempts ?? _aliveMaxAttempts;
+    for (var i = 0; i < attempts; i++) {
+      if (await _probeAlive()) return true;
+      if (Platform.isWindows && i > 0 && i % 4 == 0) {
+        final running = await MihomoBridge.isProcessRunning();
+        if (running == false) {
+          if (quiet) return false;
+          final detail = await MihomoBridge.lastStartError();
+          throw PanelApiException(
+            detail != null && detail.isNotEmpty
+                ? 'mihomo 启动失败：$detail'
+                : 'mihomo 进程意外退出',
+          );
+        }
+      }
+      await Future<void>.delayed(_alivePollGap);
     }
+    if (quiet) return false;
     final bin = await MihomoBridge.resolveBinary();
     if (bin == null) {
       throw PanelApiException(
@@ -797,37 +1114,68 @@ rules:
     );
   }
 
-  Future<void> _restartWithConfig(String config, {int maxAttempts = 60}) async {
-    final path = await MihomoPaths.configFile();
-    await Directory(await MihomoPaths.workDir()).create(recursive: true);
-    await File(path).writeAsString(config);
-    await MihomoBridge.stop();
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    final started = await MihomoBridge.start(configPath: path);
-    if (!started) {
-      final detail = await MihomoBridge.lastStartError();
-      throw PanelApiException(
-        detail != null && detail.isNotEmpty
-            ? 'mihomo 启动失败：$detail'
-            : 'mihomo 启动失败',
+  Future<void> _restartWithConfig(
+    String config, {
+    int? maxAttempts,
+    int? assertRetries,
+  }) async {
+    final attempts = maxAttempts ?? (Platform.isWindows ? 80 : 60);
+    Future<void> once() async {
+      final path = await MihomoPaths.configFile();
+      await Directory(await MihomoPaths.workDir()).create(recursive: true);
+      await File(path).writeAsString(config);
+      await MihomoBridge.stop();
+      await Future<void>.delayed(
+        Duration(milliseconds: Platform.isWindows ? 900 : 400),
       );
+      final started = await MihomoBridge.start(configPath: path);
+      if (!started) {
+        final detail = await MihomoBridge.lastStartError();
+        throw PanelApiException(
+          detail != null && detail.isNotEmpty
+              ? 'mihomo 启动失败：$detail'
+              : 'mihomo 启动失败',
+        );
+      }
+      if (!await _waitUntilAlive(maxAttempts: attempts)) {
+        throw PanelApiException('mihomo 启动超时，请检查配置与二进制权限');
+      }
+      if (!await _probeAlive()) {
+        throw PanelApiException('mihomo 启动后无响应，请重试');
+      }
+      await _assertOutboundProxiesLoaded(retries: assertRetries);
     }
-    await _waitUntilAlive(maxAttempts: maxAttempts);
-    if (!await _api.isAlive()) {
-      throw PanelApiException('mihomo 启动后无响应，请重试');
+
+    try {
+      await once();
+    } on PanelApiException catch (e) {
+      if (!Platform.isWindows) rethrow;
+      final retriable = e.message.contains('启动超时') ||
+          e.message.contains('未加载订阅节点');
+      if (!retriable) rethrow;
+      await MihomoBridge.stop();
+      await Future<void>.delayed(const Duration(milliseconds: 1000));
+      await once();
     }
-    await _assertOutboundProxiesLoaded();
   }
 
-  Future<void> _assertOutboundProxiesLoaded() async {
-    final data = await _api.proxies();
-    final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
-    final real = realOutboundProxyNames(proxies);
-    if (real.isEmpty) {
-      throw PanelApiException(
-        'mihomo 未加载订阅节点（可能端口被旧进程占用）。请完全退出应用后重试',
-      );
+  Future<void> _assertOutboundProxiesLoaded({int? retries}) async {
+    final maxRetries = retries ?? (Platform.isWindows ? 8 : 6);
+    final gap = Platform.isWindows
+        ? const Duration(milliseconds: 200)
+        : const Duration(milliseconds: 200);
+    for (var i = 0; i < maxRetries; i++) {
+      final data = await _api.proxies();
+      final proxies = data['proxies'] as Map<String, dynamic>? ?? {};
+      final real = realOutboundProxyNames(proxies);
+      if (real.isNotEmpty) return;
+      if (i < maxRetries - 1) await Future<void>.delayed(gap);
     }
+    await MihomoBridge.stop();
+    throw PanelApiException(
+      'mihomo 未加载订阅节点：9090 端口可能被其他 mihomo 进程占用。'
+      '请完全退出应用，在任务管理器中结束所有 mihomo 相关进程后重试',
+    );
   }
 
   String _prepareConfig(
@@ -1163,9 +1511,7 @@ $quicRule$dotRules  - MATCH,$matchTarget
 
     // 自动选择：优先带倍率后缀的节点（通常更稳定）
     for (final leaf in leaves) {
-      if (RegExp(r'\[x[\d.]+\]', caseSensitive: false).hasMatch(leaf)) {
-        return leaf;
-      }
+      if (hasProxyTierSuffix(leaf)) return leaf;
     }
     final real =
         leaves.where((n) => !isSubscriptionInfoNode(n)).toList();

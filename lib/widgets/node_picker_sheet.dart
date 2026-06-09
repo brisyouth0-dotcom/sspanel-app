@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../models/models.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import '../utils/node_filters.dart';
 import 'node_visuals.dart';
 import 'ping_badge.dart';
 
@@ -235,8 +236,8 @@ class _AutoSelectRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final leaf = activeLeaf?.trim();
-    final hasLeaf = leaf != null && leaf.isNotEmpty && leaf != 'DIRECT';
+    final leaf = sanitizeProxyLeaf(activeLeaf?.trim());
+    final hasLeaf = leaf != null && leaf.isNotEmpty;
 
     return Material(
       color: selected ? AppColors.primary.withValues(alpha: 0.12) : AppColors.card,

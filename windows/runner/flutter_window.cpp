@@ -4,6 +4,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "native_bridge.h"
+#include "tray_manager.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -28,6 +29,8 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   RegisterPanlinkChannels(flutter_controller_.get());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  TrayManager::Configure(GetHandle(),
+                         flutter_controller_->engine()->messenger());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -42,6 +45,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  TrayManager::Dispose();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -63,7 +67,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     }
   }
 
+  if (message == WM_USER + 101) {
+    return TrayManager::HandleTrayMessage(hwnd, wparam, lparam);
+  }
+
   switch (message) {
+    case WM_COMMAND:
+      if (TrayManager::HandleCommand(hwnd, LOWORD(wparam))) {
+        return 0;
+      }
+      break;
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;

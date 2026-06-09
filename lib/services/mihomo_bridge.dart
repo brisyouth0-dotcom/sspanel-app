@@ -55,6 +55,16 @@ class MihomoBridge {
     }
   }
 
+  /// Windows：检测已拉起的 mihomo 子进程是否仍在运行
+  static Future<bool?> isProcessRunning() async {
+    if (!Platform.isWindows) return null;
+    try {
+      return await _channel.invokeMethod<bool>('isProcessRunning');
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   /// 读取 mihomo 实时速率（bps），VPN 建立后须走原生 protect
   static Future<({int up, int down})?> pollTraffic() async {
     if (!Platform.isAndroid) return null;

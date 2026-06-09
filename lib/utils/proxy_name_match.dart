@@ -4,12 +4,20 @@ String _stripLeadingEmoji(String name) {
   return name.trim().replaceFirst(RegExp(r'^[📶🚀🔰\s]+'), '');
 }
 
-/// 倍率后缀，如 [x1.0] — 用于区分同名不同档位节点
+/// 尾部倍率标记：[x1.0]、[倍率2.5] 等
+final RegExp proxyTierSuffixPattern = RegExp(
+  r'(\[x[\d.]+\]|\[倍率[\d.]+\])$',
+  caseSensitive: false,
+);
+
+/// 倍率后缀 — 用于区分同名不同档位节点
 String? extractProxyTierSuffix(String name) {
-  final m = RegExp(r'\[x[\d.]+\]$', caseSensitive: false)
-      .firstMatch(_stripLeadingEmoji(name));
-  return m?.group(0)?.toLowerCase();
+  final m = proxyTierSuffixPattern.firstMatch(_stripLeadingEmoji(name));
+  return m?.group(1)?.toLowerCase();
 }
+
+bool hasProxyTierSuffix(String name) =>
+    extractProxyTierSuffix(name) != null;
 
 /// 面板节点名与 Clash 配置内代理名对齐（保留 [x1.0] 倍率后缀）
 String normalizeProxyLabel(String name) {
@@ -17,7 +25,15 @@ String normalizeProxyLabel(String name) {
   return s.replaceAll(RegExp(r'[\s\-_·•]'), '').toLowerCase();
 }
 
-String? matchProxyName(String nodeName, Iterable<String> proxyNames) {
+String _stripTierSuffix(String name) {
+  return name.replaceAll(proxyTierSuffixPattern, '').trim();
+}
+
+String? _matchProxyNameInternal(
+  String nodeName,
+  Iterable<String> proxyNames, {
+  required bool relaxedTier,
+}) {
   final trimmed = nodeName.trim();
   final stripped = _stripLeadingEmoji(trimmed);
   final normNode = normalizeProxyLabel(trimmed);
@@ -30,10 +46,14 @@ String? matchProxyName(String nodeName, Iterable<String> proxyNames) {
     final proxyStripped = _stripLeadingEmoji(proxy);
     final proxyTier = extractProxyTierSuffix(proxyStripped);
 
-    // 面板带 [x1.0] 必须匹配同倍率；面板无倍率则不匹配带倍率的代理
-    if (nodeTier != null) {
-      if (proxyTier != nodeTier) continue;
-    } else if (proxyTier != null) {
+    if (!relaxedTier) {
+      // 面板带倍率后缀必须匹配同倍率；面板无倍率则不匹配带倍率的代理
+      if (nodeTier != null) {
+        if (proxyTier != nodeTier) continue;
+      } else if (proxyTier != null) {
+        continue;
+      }
+    } else if (nodeTier != null && proxyTier != null && proxyTier != nodeTier) {
       continue;
     }
 
@@ -49,6 +69,17 @@ String? matchProxyName(String nodeName, Iterable<String> proxyNames) {
       score = 8000 - (normProxy.length - normNode.length).abs();
     } else if (proxy.contains(trimmed) || trimmed.contains(proxy)) {
       score = 7000 - (proxy.length - trimmed.length).abs();
+    } else if (relaxedTier) {
+      final baseNode = normalizeProxyLabel(_stripTierSuffix(stripped));
+      final baseProxy = normalizeProxyLabel(_stripTierSuffix(proxyStripped));
+      if (baseNode.isEmpty || baseProxy.isEmpty) continue;
+      if (baseNode == baseProxy) {
+        score = 6000;
+      } else if (baseProxy.contains(baseNode) || baseNode.contains(baseProxy)) {
+        score = 5500 - (baseProxy.length - baseNode.length).abs();
+      } else {
+        continue;
+      }
     } else {
       continue;
     }
@@ -58,6 +89,31 @@ String? matchProxyName(String nodeName, Iterable<String> proxyNames) {
     }
   }
   return best;
+}
+
+String? matchProxyName(String nodeName, Iterable<String> proxyNames) {
+  return _matchProxyNameInternal(nodeName, proxyNames, relaxedTier: false);
+}
+
+/// 严格匹配失败时放宽倍率后缀限制（面板无倍率也可匹配 Clash 中带倍率的节点）
+String? matchProxyNameRelaxed(String nodeName, Iterable<String> proxyNames) {
+  return _matchProxyNameInternal(nodeName, proxyNames, relaxedTier: true);
+}
+
+/// 测速 / 选路时收集所有候选 Clash 代理名
+List<String> proxyNamesForPanelNode(
+  String nodeName,
+  Iterable<String> leaves,
+) {
+  final set = <String>{};
+  final strict = matchProxyName(nodeName, leaves);
+  if (strict != null) set.add(strict);
+  if (leaves.contains(nodeName)) set.add(nodeName);
+  if (set.isEmpty) {
+    final relaxed = matchProxyNameRelaxed(nodeName, leaves);
+    if (relaxed != null) set.add(relaxed);
+  }
+  return set.toList();
 }
 
 bool isAutoSelectGroupName(String name) {
@@ -184,11 +240,37 @@ const proxyGroupTypes = {
   'Relay',
 };
 
+/// mihomo 内置策略代理类型（非真实订阅节点）
+const builtinPolicyProxyTypes = {
+  'Direct',
+  'Reject',
+  'Pass',
+  'DNS',
+  'Compatible',
+};
+
+bool isBuiltinPolicyProxyEntry(Map<String, dynamic>? item) {
+  if (item == null) return false;
+  final type = item['type']?.toString() ?? '';
+  return builtinPolicyProxyTypes.contains(type);
+}
+
+bool isBuiltinPolicyProxyName(String name) {
+  final t = name.trim();
+  if (t.isEmpty) return true;
+  final upper = t.toUpperCase();
+  if (upper == 'DIRECT' || upper == 'REJECT' || upper == 'PASS') return true;
+  if (upper.startsWith('REJECT')) return true;
+  if (upper == 'COMPATIBLE' || upper == 'GLOBAL') return true;
+  return false;
+}
+
 /// Clash 内置 / 策略组占位名，不能作为实际出站节点
 const reservedOutboundNames = {
   'GLOBAL',
   'DIRECT',
   'REJECT',
+  'REJECT-DROP',
   'COMPATIBLE',
   'PASS',
   'PROXY',
@@ -204,10 +286,8 @@ const reservedOutboundNames = {
 };
 
 bool isReservedOutboundName(String name) {
-  final t = name.trim();
-  if (t.isEmpty) return true;
-  if (reservedOutboundNames.contains(t)) return true;
-  return t.toUpperCase() == 'COMPATIBLE' || t.toUpperCase() == 'GLOBAL';
+  return isBuiltinPolicyProxyName(name) ||
+      reservedOutboundNames.contains(name.trim());
 }
 
 bool isProxyGroupEntry(Map<String, dynamic>? item) {
@@ -223,7 +303,8 @@ bool isRealOutboundProxy(String name, Map<String, dynamic> proxies) {
   if (isReservedOutboundName(trimmed)) return false;
   final item = proxies[trimmed];
   if (item is! Map<String, dynamic>) return false;
-  return !isProxyGroupEntry(item);
+  if (isProxyGroupEntry(item)) return false;
+  return !isBuiltinPolicyProxyEntry(item);
 }
 
 /// 真实可连的出站代理名

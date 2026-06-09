@@ -13,6 +13,7 @@ add_executable(${BINARY_NAME} WIN32
   "win32_window.cpp"
   "mihomo_manager.cpp"
   "system_proxy_manager.cpp"
+  "tray_manager.cpp"
   "native_bridge.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"
